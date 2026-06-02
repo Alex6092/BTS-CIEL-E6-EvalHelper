@@ -1,0 +1,221 @@
+<h4>C01 - Communiquer en situation professionnelle</h4>
+<ul>
+  <li>Le rapport (typographie, orthographe, illustration, lisibilité) est
+    soigné, personnel et argumenté avec des enchaînements cohérents
+    <ul>
+      <li>La page de titre contient les informations utiles (nom du candidat,
+        nom de l'entreprise, année, nom du lycée, BTS et option) ainsi qu’une
+        illustration adaptée. Les entêtes et pieds de pages contiennent au
+        minimum le numéro de la page et le nom du candidat. Le sommaire
+        automatique est présenté sur une seule page.</li>
+      <li>La page de titre contient les informations utiles (nom du candidat,
+        année, nom du lycée, BTS et option) ainsi qu’une illustration adaptée.
+        Le sommaire automatique est présenté sur une seule page.</li>
+      <li>Les entêtes et pieds de pages contiennent au minimum le numéro de la
+        page et le nom du candidat qui a écrit cette page.</li>
+      <li>Les chapitres s’enchaînent de façon logique, chaque chapitre est
+        introduit par une phrase et conclu par une phrase. Chaque illustration
+        est expliquée ou présentée avec une légende.</li>
+    </ul>
+  </li>
+  <li>La présentation (typographie, orthographe, illustration, lisibilité) est
+    soignée et soutient le discours avec des enchaînements cohérents
+    <ul>
+      <li>Le support est un travail personnel et ne comporte pas de faute
+        d'orthographe. La typographie et les illustrations sont soignées afin de
+        rendre le support lisible. La police est adaptée.</li>
+      <li>Le plan est proposé et cohérent.</li>
+      <li>L’introduction et la conclusion sont présentes.</li>
+      <li>Les informations choisies sont synthétiques et elles sont support du
+        discours.</li>
+    </ul>
+  </li>
+  <li>La présentation orale est de qualitée et claire
+    <ul>
+      <li>Le temps de parole est respecté.</li>
+      <li>Détachement des notes. S’exprime en regardant l’auditoire.</li>
+      <li>L'expression est de qualité : le langage est distinct, fluide et non
+        familier.</li>
+      <li>L’exposé est clair et les idées s'enchainent logiquement. Le candidat
+        utilise l'espace pour sa présentation.</li>
+    </ul>
+  </li>
+  <li>L'argumentation lors de l'échange est de qualité
+    <ul>
+      <li>L'échange est courtois.</li>
+      <li>Le candidat écoute les questions du jury, les reformule s'il ne les
+        comprend pas.</li>
+      <li>Les réponses apportées sont appropriées et témoignent d'une capacité à
+        mobiliser ses connaissances à bon escient et à les exposer clairement.
+      </li>
+      <li>Des arguments sont utilisés et les erreurs sont corrigées.</li>
+    </ul>
+  </li>
+  <li>Le style, le ton et la terminologie utilisés sont adaptés à la personne et
+    aux circonstances, notamment les éventuelles situations de handicap des
+    personnes sont prises en compte</li>
+  <li>L’attitude, les comportements et le langage adoptés sont conformes aux
+    règles de la profession, la réaction est adaptée au contexte</li>
+</ul>
+<h4> </h4>
+<h4>C03 - Gérer un projet</h4>
+<ul>
+  <li>Les documents de suivis des tâches sont renseignés, le planning
+    prévisionnel est mis à jour. Les éventuelles situation de handicap sont
+    prisent en compte.
+    <ul>
+      <li>Les taches de l'ensemble de l'équipe sont présentées via par exemple
+        un diagramme de Gantt.</li>
+      <li>L'avancement de chaque tâche est renseigné.</li>
+      <li>L'avancement est réel et témoigne de son implication dans le projet
+      </li>
+      <li>L'avancement est réel et témoigne de son implication dans le projet
+      </li>
+    </ul>
+  </li>
+  <li>L'adéquation des ressources humaines et des ressources matérielles pour
+    mener le projet est validée
+    <ul>
+      <li>L'architecture des composants logiciels et matériels du projet sont
+        présentés, un diagramme SYSML de bd/ibd ou UML déploiement est utilisé
+        pour cela.</li>
+      <li>Les moyens disponibles pour réaliser le projet sont présentés.</li>
+      <li>Le périmètre de chaque candidat est identifié.</li>
+      <li>La présentation du périmètre fonctionnel de chacun des candidats est
+        faite par un diagramme de cas d'utilisation</li>
+    </ul>
+  </li>
+  <li>L’équipe projet communique correctement et gère les retards et aléas
+    <ul>
+      <li>Un espace collaboratif (partage et modification de documents, suivi de
+        projet, etc.) est présenté.</li>
+      <li>La mise en œuvre de l'espace collaboratif est démontrée.</li>
+      <li>Le planning effectif est comparé au planning prévisionnel pour
+        permettre un constat.</li>
+      <li>L'écart entre le temps prévisionnel et le temps réalisé est justifié.
+      </li>
+    </ul>
+  </li>
+  <li>Les travaux sont réalisés et livrés avec la documentation en condordance
+    avec les besoins du client
+    <ul>
+      <li>Les différents reportings et versionings sont listés et présentés.
+      </li>
+      <li>Un espace collaboratif contient les différentes versions de livraison
+        du projet.</li>
+      <li>La dernière livraison est intégrée et packagée.</li>
+      <li>Un cahier de recette est présenté pour démontrer les concordances
+        entre les besoins et la réalisation.</li>
+    </ul>
+  </li>
+  <li>Le travail est préparé de façon à satisfaire les exigences de qualité,
+    d’efficacité et d’échéancier</li>
+  <li>La résolution d'un problème nouveau imprévu est réussie en utilisant ses
+    propres moyens conformément aux règles de la fonction</li>
+  <li>Le travail en équipe est conduit de manière solidaire en contribuant par
+    des idées et des efforts</li>
+</ul>
+<h4> </h4>
+<h4>C08 - Coder</h4>
+<ul>
+  <li>Les environnements sont choisis et justifiés et les données de
+    l’entreprise sont identifiées
+    <ul>
+      <li>Le choix de l'environnement de développement est justifié.</li>
+      <li>Les librairies utilisées sont justifiées.</li>
+      <li>Les contraintes du client sont identifiées (cybersécurité, matériels,
+        capteurs ...).</li>
+      <li>Un diagramme présente l'architecture des données (Base de données,
+        XML, JSON ...)</li>
+    </ul>
+  </li>
+  <li>Le code est versionné, commenté et le logiciel est documenté
+    <ul>
+      <li>Un outil de versionnement est en place</li>
+      <li>Le fonctionnement de l'outil de versionnement est démontré</li>
+      <li>Chaque composant est versionné.</li>
+      <li>Chaque composant est documenté.</li>
+    </ul>
+  </li>
+  <li>Les composants logiciels individuels sont développés conformément aux
+    spécifications du cahier des charges, des bonnes pratiques et des
+    différentes politiques de sécurité et de protection des données personnelles
+    <ul>
+      <li>Les tests unitaires sont réalisés et tracés dans un cahier.</li>
+      <li>Le test unitaire permet de valider les spécifications.</li>
+      <li>Les interfaces entre les composants sont documentées par un diagramme
+        de classes ou équivalent.</li>
+      <li>La politique de protection des données est présentée et justifiée.
+      </li>
+    </ul>
+  </li>
+  <li>La solution (logicielle et matérielle) est intégrée et testée conformément
+    aux spécifications du cahier des charges, des bonnes pratiques et des
+    différentes politiques de sécurité et de protection des données personnelles
+    <ul>
+      <li>Les composants du projet sont intégrés.</li>
+      <li>Une recette permet de valider les spécifications.</li>
+      <li>Pour chaque cas d'utilisation : Le cas nominal et les scénarios
+        alternatifs sont conformes.</li>
+      <li>La politique de protection des données est présentée et justifiée.
+      </li>
+    </ul>
+  </li>
+  <li>La résolution d'un problème nouveau imprévu est réussie en utilisant ses
+    propres moyens conformément aux règles de la fonction</li>
+  <li>Le travail est effectué selon les attentes exprimées de temps, de quantité
+    ou de qualité</li>
+  <li>Le travail est préparé de façon à satisfaire les exigences de qualité,
+    d’efficacité et d’échéancier</li>
+</ul>
+<h4> </h4>
+<h4>C10 - Exploiter un réseau informatique</h4>
+<ul>
+  <li>Les différents éléments matériels et/ou logiciels sont identifiés à partir
+    d’un schéma fourni
+    <ul>
+      <li>L'architecture matérielle du projet est présentée.</li>
+      <li>Un diagramme de réseau ou équivalent est utilisé pour la présentation.
+      </li>
+      <li>L'architecture des composants logiciels du projet est présentée, un
+        diagramme UML de déploiement ou équivalent est utilisé.</li>
+      <li>Le choix des matériels (actionneurs/capteurs) est justifié.</li>
+    </ul>
+  </li>
+  <li>Le fonctionnement d’un équipement matériel et/ou logiciel est vérifié en
+    tenant compte du contexte
+    <ul>
+      <li>Le fonctionnement des matériels (actionneurs/capteurs) est explicité.
+      </li>
+      <li>La mise en œuvre des capteurs est démontrée.</li>
+      <li>La communication et le format des données échangées entre les
+        matériels sont analysés et documentés.</li>
+      <li>Les outils d'analyse réseau sont maîtrisés (oscillogramme, sniffeur,
+        ping, traceroute, telnet ...).</li>
+    </ul>
+  </li>
+  <li>La mise à jour d’un matériel et/ou logiciel est proposée et justifiée
+    <ul>
+      <li>Les versions des matériels et logiciels sont listées.</li>
+      <li>Les logiciels, pilotes sont à jours.</li>
+      <li>La configuration des éléments matériels et logiciel sont à même de
+        permettre une bonne résistance aux attaques.</li>
+      <li>Les enjeux de la cybersécurité (faille de sécurité, signature,
+        certificats ...) des mises à jour sont pris en compte.</li>
+    </ul>
+  </li>
+  <li>Les optimisations ou résolution d’incidents nécessaires sont effectuées
+    <ul>
+      <li>Les outils de diagnostic sont connus.</li>
+      <li>L'outil adéquat est utilisé pour le test.</li>
+      <li>Le résultat de l'outil de test est correctement interprété.</li>
+      <li>La mise au point ou la résolution d'incident est correcte.</li>
+    </ul>
+  </li>
+  <li>La résolution d'un problème nouveau imprévu est réussie en utilisant ses
+    propres moyens</li>
+  <li>Le travail en équipe est conduit de manière solidaire en contribuant par
+    des idées et des efforts</li>
+  <li>Face à un ensemble de faits, des actions appropriées à poser sont décidées
+  </li>
+</ul>

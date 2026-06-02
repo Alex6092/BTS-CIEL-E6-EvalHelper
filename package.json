@@ -1,0 +1,19 @@
+{
+  "name": "evaluation-e6",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Application d'évaluation E6 BTS CIEL (saisie collaborative + report Excel)",
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "express": "^5.2.1",
+    "jszip": "^3.10.1",
+    "multer": "^2.1.1",
+    "ws": "^8.21.0"
+  }
+}

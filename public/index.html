@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Évaluation E6 – BTS CIEL</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="conn-status">● Hors ligne</div>
+
+<header>
+  <h1>📋 Évaluation E6 – BTS CIEL</h1>
+  <p>Saisie collaborative des compétences &amp; report Excel</p>
+</header>
+
+<!-- ════════════ ÉCRAN 1 : CANDIDATS ════════════ -->
+<div id="screen-candidates">
+  <div class="section-title">
+    <h2>Candidats</h2>
+    <button class="btn btn-primary" id="btn-toggle-add">+ Ajouter un candidat</button>
+  </div>
+
+  <div class="card">
+    <form id="add-form">
+      <div class="field">
+        <label for="in-nom">Nom *</label>
+        <input id="in-nom" type="text" autocomplete="off" required />
+      </div>
+      <div class="field">
+        <label for="in-prenom">Prénom *</label>
+        <input id="in-prenom" type="text" autocomplete="off" required />
+      </div>
+      <div class="field">
+        <label for="in-numero">Numéro candidat</label>
+        <input id="in-numero" type="text" autocomplete="off" />
+      </div>
+      <button class="btn btn-success" type="submit">Enregistrer</button>
+    </form>
+  </div>
+
+  <div class="candidate-list" id="candidate-list"></div>
+</div>
+
+<!-- ════════════ ÉCRAN 2 : SAISIE ════════════ -->
+<div id="screen-grading" class="hidden">
+  <div id="grading-bar">
+    <button class="btn btn-outline btn-sm" id="btn-back">← Candidats</button>
+    <div class="who">
+      <div class="name" id="g-name">—</div>
+      <div class="meta" id="g-meta"></div>
+    </div>
+    <div class="sheet-field">
+      <label for="sheet-select">Onglet de report</label>
+      <select id="sheet-select"></select>
+    </div>
+    <button class="btn btn-success" id="btn-export">⬇ Exporter Excel</button>
+  </div>
+
+  <div id="global-progress-wrap">
+    <div class="progress-bar-bg"><div class="progress-bar-fill" id="global-fill" style="width:0%"></div></div>
+    <span><span id="global-percent">0</span> %</span>
+  </div>
+
+  <div class="legend">
+    <strong style="color:var(--text)">Légende :</strong>
+    <span class="legend-item"><span class="legend-dot" style="background:#ef4444;box-shadow:0 0 0 2px #fecaca"></span> 0 coché → Niveau 1</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#eab308;box-shadow:0 0 0 2px #fef08a"></span> 1 coché → Niveau 2</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#3b82f6;box-shadow:0 0 0 2px #bfdbfe"></span> 2-3 cochés → Niveau 3</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#22c55e;box-shadow:0 0 0 2px #bbf7d0"></span> Tous cochés → Niveau 4</span>
+  </div>
+
+  <div style="max-width:880px;margin:0 auto 1rem;display:flex;gap:.6rem;justify-content:flex-end">
+    <button class="btn btn-outline btn-sm" onclick="expandAll()">Tout déplier</button>
+    <button class="btn btn-outline btn-sm" onclick="collapseAll()">Tout replier</button>
+  </div>
+
+  <div id="app"></div>
+</div>
+
+<div id="toast"></div>
+
+<!-- hidden file input for excel association -->
+<input type="file" id="excel-input" accept=".xlsx" class="hidden" />
+
+<script src="/hierarchy.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TODO List – Compétences BTS</title>
+  <style>
+    /* ── Reset & base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #f0f2f5;
+      --surface:   #ffffff;
+      --border:    #e2e6ea;
+      --primary:   #4f46e5;
+      --primary-light: #ede9fe;
+      --success:   #16a34a;
+      --success-light: #dcfce7;
+      --text:      #1e293b;
+      --muted:     #64748b;
+      --radius:    12px;
+      --shadow:    0 2px 12px rgba(0,0,0,.08);
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem 4rem;
+    }
+
+    /* ── Header ── */
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--primary);
+    }
+    header p {
+      color: var(--muted);
+      margin-top: .4rem;
+      font-size: .95rem;
+    }
+
+    /* ── Global progress bar ── */
+    #global-progress-wrap {
+      max-width: 820px;
+      margin: 0 auto 2rem;
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 1rem 1.4rem;
+      box-shadow: var(--shadow);
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    #global-progress-wrap span {
+      white-space: nowrap;
+      font-size: .9rem;
+      color: var(--muted);
+      min-width: 90px;
+      text-align: right;
+    }
+    .progress-bar-bg {
+      flex: 1;
+      height: 10px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--primary);
+      border-radius: 99px;
+      transition: width .35s ease;
+    }
+    #global-percent { font-weight: 700; color: var(--primary); }
+
+    /* ── Cards (sections) ── */
+    .section-card {
+      max-width: 820px;
+      margin: 0 auto 1.5rem;
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: .9rem 1.2rem;
+      background: var(--primary);
+      color: #fff;
+      cursor: pointer;
+      user-select: none;
+      gap: .8rem;
+    }
+    .section-header h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      flex: 1;
+    }
+    .section-badge {
+      background: rgba(255,255,255,.25);
+      border-radius: 99px;
+      padding: .15rem .65rem;
+      font-size: .8rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .section-badge.done { background: var(--success); }
+
+    .section-toggle-icon {
+      font-size: 1rem;
+      transition: transform .25s;
+    }
+    .section-card.collapsed .section-toggle-icon { transform: rotate(-90deg); }
+
+    .section-progress-bar {
+      height: 4px;
+      background: var(--primary-light);
+    }
+    .section-progress-fill {
+      height: 100%;
+      background: var(--success);
+      transition: width .35s ease;
+    }
+
+    .section-body { padding: .5rem 0; }
+    .section-card.collapsed .section-body { display: none; }
+
+    /* ── Parent items ── */
+    .parent-item {
+      padding: .55rem 1.2rem .55rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .parent-item:last-child { border-bottom: none; }
+
+    .parent-label-row {
+      display: flex;
+      align-items: flex-start;
+      gap: .65rem;
+      cursor: pointer;
+    }
+
+    /* ── Checkboxes ── */
+    input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      border: 2px solid var(--border);
+      border-radius: 5px;
+      cursor: pointer;
+      position: relative;
+      transition: background .2s, border-color .2s;
+      margin-top: 2px;
+    }
+    input[type="checkbox"]:checked {
+      background: var(--success);
+      border-color: var(--success);
+    }
+    input[type="checkbox"]:checked::after {
+      content: '';
+      position: absolute;
+      left: 3px; top: 0px;
+      width: 5px; height: 9px;
+      border: 2px solid #fff;
+      border-top: none; border-left: none;
+      transform: rotate(45deg);
+    }
+    input[type="checkbox"].indeterminate {
+      border-color: var(--primary);
+      background: var(--primary-light);
+    }
+    input[type="checkbox"].indeterminate::after {
+      content: '';
+      position: absolute;
+      left: 2px; top: 6px;
+      width: 10px; height: 2px;
+      background: var(--primary);
+      border: none; transform: none;
+    }
+
+    /* ── Parent text ── */
+    .parent-text {
+      font-size: .9rem;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.45;
+      flex: 1;
+      transition: color .2s;
+    }
+    .parent-text.checked-text {
+      color: var(--success);
+      text-decoration: line-through;
+      text-decoration-color: #86efac;
+    }
+
+    /* toggle children icon */
+    .toggle-children {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: .75rem;
+      padding: 2px 4px;
+      border-radius: 4px;
+      transition: background .2s;
+      margin-top: 1px;
+    }
+    .toggle-children:hover { background: var(--border); }
+
+    /* ── Children list ── */
+    .children-list {
+      margin: .4rem 0 .2rem 2.2rem;
+      display: flex;
+      flex-direction: column;
+      gap: .3rem;
+    }
+    .child-item {
+      display: flex;
+      align-items: flex-start;
+      gap: .55rem;
+      padding: .35rem .6rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .child-item:hover { background: var(--bg); }
+
+    .child-text {
+      font-size: .85rem;
+      color: var(--muted);
+      line-height: 1.45;
+      flex: 1;
+      transition: color .2s;
+    }
+    .child-text.checked-text {
+      color: #a7f3d0;
+      color: var(--success);
+      opacity: .7;
+      text-decoration: line-through;
+      text-decoration-color: #86efac;
+    }
+
+    /* ── Buttons ── */
+    .actions {
+      max-width: 820px;
+      margin: 0 auto 1.5rem;
+      display: flex;
+      gap: .7rem;
+      justify-content: flex-end;
+    }
+    button.btn {
+      padding: .45rem 1rem;
+      border-radius: 8px;
+      border: none;
+      font-size: .85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    button.btn:hover { opacity: .85; }
+    .btn-outline {
+      background: var(--surface);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .btn-danger {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+
+    /* ── Status dot ── */
+    .status-dot {
+      width: 13px;
+      height: 13px;
+      min-width: 13px;
+      border-radius: 50%;
+      margin-top: 3px;
+      flex-shrink: 0;
+      transition: background-color .3s ease, box-shadow .3s ease;
+      box-shadow: 0 0 0 2px rgba(0,0,0,.06);
+    }
+    .dot-red    { background: #ef4444; box-shadow: 0 0 0 2px #fecaca; }
+    .dot-yellow { background: #eab308; box-shadow: 0 0 0 2px #fef08a; }
+    .dot-blue   { background: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }
+    .dot-green  { background: #22c55e; box-shadow: 0 0 0 2px #bbf7d0; }
+
+    /* ── Legend ── */
+    .legend {
+      max-width: 820px;
+      margin: 0 auto 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: .6rem .9rem;
+      font-size: .8rem;
+      color: var(--muted);
+      align-items: center;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+    }
+    .legend-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 500px) {
+      header h1 { font-size: 1.4rem; }
+      .section-header h2 { font-size: .9rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>✅ Grille d'évaluation BTS</h1>
+  <p>Cochez les critères au fur et à mesure de votre avancement</p>
+</header>
+
+<!-- Global progress -->
+<div id="global-progress-wrap">
+  <div class="progress-bar-bg">
+    <div class="progress-bar-fill" id="global-fill" style="width:0%"></div>
+  </div>
+  <span><span id="global-percent">0</span> %</span>
+</div>
+
+<!-- Legend -->
+<div class="legend">
+  <strong style="color:var(--text)">Légende :</strong>
+  <span class="legend-item"><span class="legend-dot" style="background:#ef4444;box-shadow:0 0 0 2px #fecaca"></span> Aucun sous-critère coché</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#eab308;box-shadow:0 0 0 2px #fef08a"></span> 1 sous-critère coché</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#3b82f6;box-shadow:0 0 0 2px #bfdbfe"></span> 2 ou 3 sous-critères cochés</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#22c55e;box-shadow:0 0 0 2px #bbf7d0"></span> Tous les sous-critères cochés</span>
+</div>
+
+<!-- Action buttons -->
+<div class="actions">
+  <button class="btn btn-outline" onclick="expandAll()">Tout déplier</button>
+  <button class="btn btn-outline" onclick="collapseAll()">Tout replier</button>
+  <button class="btn btn-danger" onclick="resetAll()">Réinitialiser</button>
+</div>
+
+<!-- ════════════════════════════════════
+     DATA – generated from hierarchie.txt
+     ════════════════════════════════════ -->
+<div id="app"></div>
+
+<script>
+/* ── DATA ─────────────────────────────────────────────────── */
+const sections = [
+  {
+    id: "C01",
+    title: "C01 – Communiquer en situation professionnelle",
+    items: [
+      {
+        id: "C01-1",
+        text: "Le rapport (typographie, orthographe, illustration, lisibilité) est soigné, personnel et argumenté avec des enchaînements cohérents",
+        children: [
+          { id: "C01-1-1", text: "La page de titre contient les informations utiles (nom du candidat, nom de l'entreprise, année, nom du lycée, BTS et option) ainsi qu'une illustration adaptée. Les entêtes et pieds de pages contiennent au minimum le numéro de la page et le nom du candidat. Le sommaire automatique est présenté sur une seule page." },
+          { id: "C01-1-2", text: "La page de titre contient les informations utiles (nom du candidat, année, nom du lycée, BTS et option) ainsi qu'une illustration adaptée. Le sommaire automatique est présenté sur une seule page." },
+          { id: "C01-1-3", text: "Les entêtes et pieds de pages contiennent au minimum le numéro de la page et le nom du candidat qui a écrit cette page." },
+          { id: "C01-1-4", text: "Les chapitres s'enchaînent de façon logique, chaque chapitre est introduit par une phrase et conclu par une phrase. Chaque illustration est expliquée ou présentée avec une légende." },
+        ]
+      },
+      {
+        id: "C01-2",
+        text: "La présentation (typographie, orthographe, illustration, lisibilité) est soignée et soutient le discours avec des enchaînements cohérents",
+        children: [
+          { id: "C01-2-1", text: "Le support est un travail personnel et ne comporte pas de faute d'orthographe. La typographie et les illustrations sont soignées afin de rendre le support lisible. La police est adaptée." },
+          { id: "C01-2-2", text: "Le plan est proposé et cohérent." },
+          { id: "C01-2-3", text: "L'introduction et la conclusion sont présentes." },
+          { id: "C01-2-4", text: "Les informations choisies sont synthétiques et elles sont support du discours." },
+        ]
+      },
+      {
+        id: "C01-3",
+        text: "La présentation orale est de qualité et claire",
+        children: [
+          { id: "C01-3-1", text: "Le temps de parole est respecté." },
+          { id: "C01-3-2", text: "Détachement des notes. S'exprime en regardant l'auditoire." },
+          { id: "C01-3-3", text: "L'expression est de qualité : le langage est distinct, fluide et non familier." },
+          { id: "C01-3-4", text: "L'exposé est clair et les idées s'enchainent logiquement. Le candidat utilise l'espace pour sa présentation." },
+        ]
+      },
+      {
+        id: "C01-4",
+        text: "L'argumentation lors de l'échange est de qualité",
+        children: [
+          { id: "C01-4-1", text: "L'échange est courtois." },
+          { id: "C01-4-2", text: "Le candidat écoute les questions du jury, les reformule s'il ne les comprend pas." },
+          { id: "C01-4-3", text: "Les réponses apportées sont appropriées et témoignent d'une capacité à mobiliser ses connaissances à bon escient et à les exposer clairement." },
+          { id: "C01-4-4", text: "Des arguments sont utilisés et les erreurs sont corrigées." },
+        ]
+      },
+      { id: "C01-5", text: "Le style, le ton et la terminologie utilisés sont adaptés à la personne et aux circonstances, notamment les éventuelles situations de handicap des personnes sont prises en compte", children: [] },
+      { id: "C01-6", text: "L'attitude, les comportements et le langage adoptés sont conformes aux règles de la profession, la réaction est adaptée au contexte", children: [] },
+    ]
+  },
+  {
+    id: "C03",
+    title: "C03 – Gérer un projet",
+    items: [
+      {
+        id: "C03-1",
+        text: "Les documents de suivis des tâches sont renseignés, le planning prévisionnel est mis à jour. Les éventuelles situation de handicap sont prisent en compte.",
+        children: [
+          { id: "C03-1-1", text: "Les taches de l'ensemble de l'équipe sont présentées via par exemple un diagramme de Gantt." },
+          { id: "C03-1-2", text: "L'avancement de chaque tâche est renseigné." },
+          { id: "C03-1-3", text: "L'avancement est réel et témoigne de son implication dans le projet." },
+          { id: "C03-1-4", text: "L'avancement est réel et témoigne de son implication dans le projet." },
+        ]
+      },
+      {
+        id: "C03-2",
+        text: "L'adéquation des ressources humaines et des ressources matérielles pour mener le projet est validée",
+        children: [
+          { id: "C03-2-1", text: "L'architecture des composants logiciels et matériels du projet sont présentés, un diagramme SYSML de bd/ibd ou UML déploiement est utilisé pour cela." },
+          { id: "C03-2-2", text: "Les moyens disponibles pour réaliser le projet sont présentés." },
+          { id: "C03-2-3", text: "Le périmètre de chaque candidat est identifié." },
+          { id: "C03-2-4", text: "La présentation du périmètre fonctionnel de chacun des candidats est faite par un diagramme de cas d'utilisation." },
+        ]
+      },
+      {
+        id: "C03-3",
+        text: "L'équipe projet communique correctement et gère les retards et aléas",
+        children: [
+          { id: "C03-3-1", text: "Un espace collaboratif (partage et modification de documents, suivi de projet, etc.) est présenté." },
+          { id: "C03-3-2", text: "La mise en œuvre de l'espace collaboratif est démontrée." },
+          { id: "C03-3-3", text: "Le planning effectif est comparé au planning prévisionnel pour permettre un constat." },
+          { id: "C03-3-4", text: "L'écart entre le temps prévisionnel et le temps réalisé est justifié." },
+        ]
+      },
+      {
+        id: "C03-4",
+        text: "Les travaux sont réalisés et livrés avec la documentation en concordance avec les besoins du client",
+        children: [
+          { id: "C03-4-1", text: "Les différents reportings et versionings sont listés et présentés." },
+          { id: "C03-4-2", text: "Un espace collaboratif contient les différentes versions de livraison du projet." },
+          { id: "C03-4-3", text: "La dernière livraison est intégrée et packagée." },
+          { id: "C03-4-4", text: "Un cahier de recette est présenté pour démontrer les concordances entre les besoins et la réalisation." },
+        ]
+      },
+      { id: "C03-5", text: "Le travail est préparé de façon à satisfaire les exigences de qualité, d'efficacité et d'échéancier", children: [] },
+      { id: "C03-6", text: "La résolution d'un problème nouveau imprévu est réussie en utilisant ses propres moyens conformément aux règles de la fonction", children: [] },
+      { id: "C03-7", text: "Le travail en équipe est conduit de manière solidaire en contribuant par des idées et des efforts", children: [] },
+    ]
+  },
+  {
+    id: "C08",
+    title: "C08 – Coder",
+    items: [
+      {
+        id: "C08-1",
+        text: "Les environnements sont choisis et justifiés et les données de l'entreprise sont identifiées",
+        children: [
+          { id: "C08-1-1", text: "Le choix de l'environnement de développement est justifié." },
+          { id: "C08-1-2", text: "Les librairies utilisées sont justifiées." },
+          { id: "C08-1-3", text: "Les contraintes du client sont identifiées (cybersécurité, matériels, capteurs ...)." },
+          { id: "C08-1-4", text: "Un diagramme présente l'architecture des données (Base de données, XML, JSON ...)." },
+        ]
+      },
+      {
+        id: "C08-2",
+        text: "Le code est versionné, commenté et le logiciel est documenté",
+        children: [
+          { id: "C08-2-1", text: "Un outil de versionnement est en place." },
+          { id: "C08-2-2", text: "Le fonctionnement de l'outil de versionnement est démontré." },
+          { id: "C08-2-3", text: "Chaque composant est versionné." },
+          { id: "C08-2-4", text: "Chaque composant est documenté." },
+        ]
+      },
+      {
+        id: "C08-3",
+        text: "Les composants logiciels individuels sont développés conformément aux spécifications du cahier des charges, des bonnes pratiques et des différentes politiques de sécurité et de protection des données personnelles",
+        children: [
+          { id: "C08-3-1", text: "Les tests unitaires sont réalisés et tracés dans un cahier." },
+          { id: "C08-3-2", text: "Le test unitaire permet de valider les spécifications." },
+          { id: "C08-3-3", text: "Les interfaces entre les composants sont documentées par un diagramme de classes ou équivalent." },
+          { id: "C08-3-4", text: "La politique de protection des données est présentée et justifiée." },
+        ]
+      },
+      {
+        id: "C08-4",
+        text: "La solution (logicielle et matérielle) est intégrée et testée conformément aux spécifications du cahier des charges, des bonnes pratiques et des différentes politiques de sécurité et de protection des données personnelles",
+        children: [
+          { id: "C08-4-1", text: "Les composants du projet sont intégrés." },
+          { id: "C08-4-2", text: "Une recette permet de valider les spécifications." },
+          { id: "C08-4-3", text: "Pour chaque cas d'utilisation : Le cas nominal et les scénarios alternatifs sont conformes." },
+          { id: "C08-4-4", text: "La politique de protection des données est présentée et justifiée." },
+        ]
+      },
+      { id: "C08-5", text: "La résolution d'un problème nouveau imprévu est réussie en utilisant ses propres moyens conformément aux règles de la fonction", children: [] },
+      { id: "C08-6", text: "Le travail est effectué selon les attentes exprimées de temps, de quantité ou de qualité", children: [] },
+      { id: "C08-7", text: "Le travail est préparé de façon à satisfaire les exigences de qualité, d'efficacité et d'échéancier", children: [] },
+    ]
+  },
+  {
+    id: "C10",
+    title: "C10 – Exploiter un réseau informatique",
+    items: [
+      {
+        id: "C10-1",
+        text: "Les différents éléments matériels et/ou logiciels sont identifiés à partir d'un schéma fourni",
+        children: [
+          { id: "C10-1-1", text: "L'architecture matérielle du projet est présentée." },
+          { id: "C10-1-2", text: "Un diagramme de réseau ou équivalent est utilisé pour la présentation." },
+          { id: "C10-1-3", text: "L'architecture des composants logiciels du projet est présentée, un diagramme UML de déploiement ou équivalent est utilisé." },
+          { id: "C10-1-4", text: "Le choix des matériels (actionneurs/capteurs) est justifié." },
+        ]
+      },
+      {
+        id: "C10-2",
+        text: "Le fonctionnement d'un équipement matériel et/ou logiciel est vérifié en tenant compte du contexte",
+        children: [
+          { id: "C10-2-1", text: "Le fonctionnement des matériels (actionneurs/capteurs) est explicité." },
+          { id: "C10-2-2", text: "La mise en œuvre des capteurs est démontrée." },
+          { id: "C10-2-3", text: "La communication et le format des données échangées entre les matériels sont analysés et documentés." },
+          { id: "C10-2-4", text: "Les outils d'analyse réseau sont maîtrisés (oscillogramme, sniffeur, ping, traceroute, telnet ...)." },
+        ]
+      },
+      {
+        id: "C10-3",
+        text: "La mise à jour d'un matériel et/ou logiciel est proposée et justifiée",
+        children: [
+          { id: "C10-3-1", text: "Les versions des matériels et logiciels sont listées." },
+          { id: "C10-3-2", text: "Les logiciels, pilotes sont à jours." },
+          { id: "C10-3-3", text: "La configuration des éléments matériels et logiciel sont à même de permettre une bonne résistance aux attaques." },
+          { id: "C10-3-4", text: "Les enjeux de la cybersécurité (faille de sécurité, signature, certificats ...) des mises à jour sont pris en compte." },
+        ]
+      },
+      {
+        id: "C10-4",
+        text: "Les optimisations ou résolution d'incidents nécessaires sont effectuées",
+        children: [
+          { id: "C10-4-1", text: "Les outils de diagnostic sont connus." },
+          { id: "C10-4-2", text: "L'outil adéquat est utilisé pour le test." },
+          { id: "C10-4-3", text: "Le résultat de l'outil de test est correctement interprété." },
+          { id: "C10-4-4", text: "La mise au point ou la résolution d'incident est correcte." },
+        ]
+      },
+      { id: "C10-5", text: "La résolution d'un problème nouveau imprévu est réussie en utilisant ses propres moyens", children: [] },
+      { id: "C10-6", text: "Le travail en équipe est conduit de manière solidaire en contribuant par des idées et des efforts", children: [] },
+      { id: "C10-7", text: "Face à un ensemble de faits, des actions appropriées à poser sont décidées", children: [] },
+    ]
+  },
+];
+
+/* ── STATE (localStorage) ────────────────────────────────── */
+const STORAGE_KEY = "bts-todo-v1";
+
+function loadState() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveState(state) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+let state = loadState(); // { [id]: true/false }
+
+function isChecked(id) { return !!state[id]; }
+function setChecked(id, val) {
+  state[id] = val;
+  saveState(state);
+}
+
+/* ── BUILD DOM ───────────────────────────────────────────── */
+const app = document.getElementById("app");
+
+sections.forEach(section => {
+  const card = document.createElement("div");
+  card.className = "section-card";
+  card.id = "card-" + section.id;
+
+  /* header */
+  const hdr = document.createElement("div");
+  hdr.className = "section-header";
+  hdr.innerHTML = `
+    <h2>${section.title}</h2>
+    <span class="section-badge" id="badge-${section.id}">0 / 0</span>
+    <span class="section-toggle-icon">▾</span>
+  `;
+  hdr.addEventListener("click", () => toggleSection(section.id));
+  card.appendChild(hdr);
+
+  /* section progress bar */
+  const pbar = document.createElement("div");
+  pbar.className = "section-progress-bar";
+  pbar.innerHTML = `<div class="section-progress-fill" id="spfill-${section.id}" style="width:0%"></div>`;
+  card.appendChild(pbar);
+
+  /* body */
+  const body = document.createElement("div");
+  body.className = "section-body";
+
+  section.items.forEach(item => {
+    const hasChildren = item.children && item.children.length > 0;
+    const pDiv = document.createElement("div");
+    pDiv.className = "parent-item";
+
+    /* parent row */
+    const row = document.createElement("div");
+    row.className = "parent-label-row";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.id = "cb-" + item.id;
+    cb.checked = isChecked(item.id);
+    cb.addEventListener("change", () => onParentChange(item, cb.checked));
+
+    const dot = document.createElement("span");
+    dot.className = "status-dot";
+    dot.id = "dot-" + item.id;
+
+    const label = document.createElement("label");
+    label.htmlFor = "cb-" + item.id;
+    label.className = "parent-text" + (isChecked(item.id) ? " checked-text" : "");
+    label.textContent = item.text;
+
+    row.appendChild(cb);
+    row.appendChild(dot);
+    row.appendChild(label);
+
+    if (hasChildren) {
+      const btn = document.createElement("button");
+      btn.className = "toggle-children";
+      btn.title = "Afficher / masquer les sous-critères";
+      btn.textContent = "▾";
+      btn.setAttribute("aria-expanded", "true");
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const cl = pDiv.querySelector(".children-list");
+        const expanded = btn.getAttribute("aria-expanded") === "true";
+        cl.style.display = expanded ? "none" : "flex";
+        btn.setAttribute("aria-expanded", String(!expanded));
+        btn.textContent = expanded ? "▸" : "▾";
+      });
+      row.appendChild(btn);
+    }
+
+    pDiv.appendChild(row);
+
+    /* children */
+    if (hasChildren) {
+      const ul = document.createElement("div");
+      ul.className = "children-list";
+
+      item.children.forEach(child => {
+        const li = document.createElement("div");
+        li.className = "child-item";
+        li.addEventListener("click", () => {
+          const ccb = document.getElementById("cb-" + child.id);
+          ccb.checked = !ccb.checked;
+          onChildChange(item, child, ccb.checked);
+        });
+
+        const ccb = document.createElement("input");
+        ccb.type = "checkbox";
+        ccb.id = "cb-" + child.id;
+        ccb.checked = isChecked(child.id);
+        ccb.addEventListener("click", e => e.stopPropagation());
+        ccb.addEventListener("change", () => onChildChange(item, child, ccb.checked));
+
+        const span = document.createElement("span");
+        span.className = "child-text" + (isChecked(child.id) ? " checked-text" : "");
+        span.textContent = child.text;
+
+        li.appendChild(ccb);
+        li.appendChild(span);
+        ul.appendChild(li);
+      });
+
+      pDiv.appendChild(ul);
+    }
+
+    body.appendChild(pDiv);
+  });
+
+  card.appendChild(body);
+  app.appendChild(card);
+});
+
+/* ── STATUS DOT ──────────────────────────────────────────── */
+function updateStatusDot(item) {
+  const dot = document.getElementById("dot-" + item.id);
+  if (!dot) return;
+
+  let colorClass;
+  if (!item.children || item.children.length === 0) {
+    // Pas de sous-critères : rouge / vert selon la checkbox
+    colorClass = isChecked(item.id) ? "dot-green" : "dot-red";
+  } else {
+    const checkedCount = item.children.filter(c => isChecked(c.id)).length;
+    const total = item.children.length;
+    if (checkedCount === 0)          colorClass = "dot-red";
+    else if (checkedCount === 1)     colorClass = "dot-yellow";
+    else if (checkedCount === total) colorClass = "dot-green";
+    else                             colorClass = "dot-blue"; // 2 ou 3
+  }
+
+  dot.className = "status-dot " + colorClass;
+}
+
+/* ── EVENT HANDLERS ──────────────────────────────────────── */
+function onParentChange(item, checked) {
+  setChecked(item.id, checked);
+  updateParentUI(item);
+
+  // propagate to children
+  if (item.children) {
+    item.children.forEach(child => {
+      const ccb = document.getElementById("cb-" + child.id);
+      if (ccb) ccb.checked = checked;
+      setChecked(child.id, checked);
+      updateChildUI(child, checked);
+    });
+  }
+  updateStatusDot(item);
+  updateSectionProgress(getSectionOfItem(item.id));
+  updateGlobalProgress();
+}
+
+function onChildChange(parent, child, checked) {
+  setChecked(child.id, checked);
+  updateChildUI(child, checked);
+  syncParentToChildren(parent);
+  updateSectionProgress(getSectionOfItem(parent.id));
+  updateGlobalProgress();
+}
+
+function syncParentToChildren(parent) {
+  if (!parent.children || parent.children.length === 0) return;
+  const checkedCount = parent.children.filter(c => isChecked(c.id)).length;
+  const total = parent.children.length;
+  const pcb = document.getElementById("cb-" + parent.id);
+  const plabel = document.querySelector(`label[for="cb-${parent.id}"]`);
+
+  if (checkedCount === 0) {
+    pcb.checked = false;
+    pcb.classList.remove("indeterminate");
+    setChecked(parent.id, false);
+    if (plabel) plabel.classList.remove("checked-text");
+  } else if (checkedCount === total) {
+    pcb.checked = true;
+    pcb.classList.remove("indeterminate");
+    setChecked(parent.id, true);
+    if (plabel) plabel.classList.add("checked-text");
+  } else {
+    pcb.checked = false;
+    pcb.classList.add("indeterminate");
+    setChecked(parent.id, false);
+    if (plabel) plabel.classList.remove("checked-text");
+  }
+  updateStatusDot(parent);
+}
+
+function updateParentUI(item) {
+  const pcb = document.getElementById("cb-" + item.id);
+  const plabel = document.querySelector(`label[for="cb-${item.id}"]`);
+  if (pcb && pcb.checked) {
+    if (plabel) plabel.classList.add("checked-text");
+  } else {
+    if (plabel) plabel.classList.remove("checked-text");
+  }
+  if (pcb) pcb.classList.remove("indeterminate");
+}
+
+function updateChildUI(child, checked) {
+  const span = document.querySelector(`#cb-${child.id} + span, #cb-${child.id} ~ span`);
+  // use id-based lookup instead
+  const ccb = document.getElementById("cb-" + child.id);
+  if (ccb) {
+    const li = ccb.closest(".child-item");
+    const s = li ? li.querySelector(".child-text") : null;
+    if (s) {
+      if (checked) s.classList.add("checked-text");
+      else s.classList.remove("checked-text");
+    }
+  }
+}
+
+/* ── PROGRESS ────────────────────────────────────────────── */
+function countLeafItems(section) {
+  let total = 0, done = 0;
+  section.items.forEach(item => {
+    if (!item.children || item.children.length === 0) {
+      total++;
+      if (isChecked(item.id)) done++;
+    } else {
+      item.children.forEach(child => {
+        total++;
+        if (isChecked(child.id)) done++;
+      });
+    }
+  });
+  return { total, done };
+}
+
+function updateSectionProgress(sectionId) {
+  const section = sections.find(s => s.id === sectionId);
+  if (!section) return;
+  const { total, done } = countLeafItems(section);
+  const pct = total ? Math.round(done / total * 100) : 0;
+  const fill = document.getElementById("spfill-" + sectionId);
+  const badge = document.getElementById("badge-" + sectionId);
+  if (fill) fill.style.width = pct + "%";
+  if (badge) {
+    badge.textContent = done + " / " + total;
+    badge.classList.toggle("done", done === total && total > 0);
+  }
+}
+
+function updateGlobalProgress() {
+  let total = 0, done = 0;
+  sections.forEach(section => {
+    const c = countLeafItems(section);
+    total += c.total;
+    done += c.done;
+  });
+  const pct = total ? Math.round(done / total * 100) : 0;
+  document.getElementById("global-fill").style.width = pct + "%";
+  document.getElementById("global-percent").textContent = pct;
+}
+
+function getSectionOfItem(itemId) {
+  for (const s of sections) {
+    for (const item of s.items) {
+      if (item.id === itemId) return s.id;
+      if (item.children && item.children.find(c => c.id === itemId)) return s.id;
+    }
+  }
+  return null;
+}
+
+/* ── SECTION COLLAPSE ────────────────────────────────────── */
+function toggleSection(sectionId) {
+  const card = document.getElementById("card-" + sectionId);
+  card.classList.toggle("collapsed");
+}
+function collapseAll() {
+  sections.forEach(s => document.getElementById("card-" + s.id).classList.add("collapsed"));
+}
+function expandAll() {
+  sections.forEach(s => document.getElementById("card-" + s.id).classList.remove("collapsed"));
+}
+
+/* ── RESET ───────────────────────────────────────────────── */
+function resetAll() {
+  if (!confirm("Réinitialiser toute la liste ? Cette action est irréversible.")) return;
+  state = {};
+  saveState(state);
+  // uncheck everything
+  document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.checked = false;
+    cb.classList.remove("indeterminate");
+  });
+  document.querySelectorAll(".checked-text").forEach(el => el.classList.remove("checked-text"));
+  sections.forEach(s => {
+    s.items.forEach(item => updateStatusDot(item));
+    updateSectionProgress(s.id);
+  });
+  updateGlobalProgress();
+}
+
+/* ── INIT ────────────────────────────────────────────────── */
+// Sync indeterminate states on load
+sections.forEach(section => {
+  section.items.forEach(item => {
+    if (item.children && item.children.length > 0) {
+      syncParentToChildren(item); // already calls updateStatusDot
+      // restore child UI
+      item.children.forEach(child => updateChildUI(child, isChecked(child.id)));
+    } else {
+      updateParentUI(item);
+      updateStatusDot(item);
+    }
+  });
+  updateSectionProgress(section.id);
+});
+updateGlobalProgress();
+</script>
+</body>
+</html>
