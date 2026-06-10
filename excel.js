@@ -1,17 +1,19 @@
 /* ════════════════════════════════════════════════════════════════
    excel.js  —  Génère une COPIE du fichier Excel d'un candidat
-                avec les pastilles reportées dans la bonne colonne.
+                avec les évaluations reportées.
 
-   Édition CHIRURGICALE du .xlsx (zip) : on ne touche QUE le XML de
-   l'onglet ciblé (cellules), en préservant les styles. Tout le reste
-   (dessins, plages nommées, médias, commentaires, formules) est laissé
-   intact octet pour octet — contrairement à une réécriture complète
-   qui corrompt dessins et plages nommées.
+   Édition CHIRURGICALE du .xlsx (zip) : on ne modifie QUE le XML des
+   onglets remplis, en préservant les styles cellule par cellule.
+   Tout le reste (dessins, plages nommées, médias, commentaires Excel,
+   formules) est laissé intact octet pour octet.
+
+   - exportEvaluation : remplit UN onglet (selon le rôle de l'appelant)
+   - exportFull       : remplit TOUS les onglets (admin / enseignant)
    ════════════════════════════════════════════════════════════════ */
 const JSZip = require("jszip");
 const path = require("path");
 const fs = require("fs");
-const { SHEETS, HIERARCHY, computeLevel } = require("./hierarchy");
+const { SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, computeLevel } = require("./hierarchy");
 
 const EXPORT_DIR = path.join(__dirname, "exports");
 if (!fs.existsSync(EXPORT_DIR)) fs.mkdirSync(EXPORT_DIR, { recursive: true });
@@ -29,7 +31,6 @@ const colIndex = (addr) => {
 };
 const rowNum = (addr) => parseInt(addr.match(/\d+/)[0], 10);
 
-// Trouve une cellule existante : capture le groupe d'attributs
 function findCellRe(addr) {
   return new RegExp(`<c r="${addr}"([^>]*?)(?:/>|>[\\s\\S]*?</c>)`);
 }
@@ -42,7 +43,7 @@ function setCellString(xml, addr, value) {
   const sAttr = m ? ((m[1].match(/ s="\d+"/) || [""])[0]) : "";
   const cell = `<c r="${addr}"${sAttr} t="inlineStr"><is><t xml:space="preserve">${v}</t></is></c>`;
   if (m) return xml.replace(re, cell);
-  return insertCell(xml, addr, cell); // fallback si la cellule n'existe pas
+  return insertCell(xml, addr, cell);
 }
 
 // Vide une cellule (garde le style)
@@ -72,7 +73,7 @@ function insertCell(xml, addr, cell) {
   return xml.replace(rowRe, rm[1] + out + rm[3]);
 }
 
-// Résout le nom d'onglet -> fichier xl/worksheets/sheetN.xml
+// Résout le nom d'onglet -> chemin xl/worksheets/sheetN.xml
 async function resolveSheetPath(zip, sheetName) {
   const wb = await zip.file("xl/workbook.xml").async("string");
   const n = escRe(sheetName);
@@ -89,68 +90,103 @@ async function resolveSheetPath(zip, sheetName) {
   return target;
 }
 
-/**
- * @param candidate  ligne candidate (db) — doit avoir excelPath
- * @param sheetKey   'R3' ou 'SO'
- * @param evaluation { itemId: bool } pour ce candidat + onglet
- * @returns { filePath, fileName }
- */
-async function exportEvaluation(candidate, sheetKey, evaluation) {
-  if (!candidate.excelPath || !fs.existsSync(candidate.excelPath)) {
-    throw new Error("Aucun fichier Excel associé à ce candidat.");
+/* Remplit le XML d'un onglet : infos candidat, académie/établissement,
+   commentaire, croix des niveaux. */
+function fillSheetXml(xml, sheetKey, candidate, evaluation, comment, settings) {
+  const cfg = SHEET_CONFIG[sheetKey];
+
+  // En-têtes
+  if (settings.academie)      xml = setCellString(xml, cfg.info.academie, settings.academie);
+  if (settings.etablissement) xml = setCellString(xml, cfg.info.etablissement, settings.etablissement);
+  xml = setCellString(xml, cfg.info.nom, candidate.nom || "");
+  xml = setCellString(xml, cfg.info.prenom, candidate.prenom || "");
+  xml = setCellString(xml, cfg.info.numero, candidate.numero || "");
+  xml = setCellString(xml, cfg.info.date, new Date().toLocaleDateString("fr-FR"));
+
+  // Commentaire (cellule fusionnée, texte multi-lignes accepté)
+  if (comment && comment.trim()) {
+    xml = setCellString(xml, cfg.commentCell, comment.trim());
   }
-  const sheetName = SHEETS[sheetKey];
-  if (!sheetName) throw new Error("Onglet inconnu : " + sheetKey);
 
-  const zip = await JSZip.loadAsync(fs.readFileSync(candidate.excelPath));
-  const sheetPath = await resolveSheetPath(zip, sheetName);
-  let xml = await zip.file(sheetPath).async("string");
-
-  // ── Infos candidat (cellules de valeur fusionnées) ──
-  xml = setCellString(xml, "E9",  candidate.nom || "");
-  xml = setCellString(xml, "E10", candidate.prenom || "");
-  xml = setCellString(xml, "E11", candidate.numero || "");
-  xml = setCellString(xml, "E12", new Date().toLocaleDateString("fr-FR"));
-
-  // ── Pastilles -> croix "x" dans la bonne colonne ──
-  for (const section of HIERARCHY) {
+  // Croix de niveau — uniquement les lignes de la hiérarchie de CET onglet
+  // (en R1, C08/C10 sont absents -> zones "NON EVALUE" fusionnées intactes)
+  for (const section of HIERARCHIES[sheetKey]) {
     for (const item of section.items) {
       const total = (item.children || []).length;
       const checked = (item.children || []).filter(c => evaluation[c.id]).length;
       const { col } = computeLevel(checked, total);
       const row = item.excelRow;
-      for (const c of LEVEL_COLS) xml = clearCell(xml, c + row); // exactement une croix
+      for (const c of LEVEL_COLS) xml = clearCell(xml, c + row);
       xml = setCellString(xml, col + row, "x");
     }
   }
+  return xml;
+}
 
-  zip.file(sheetPath, xml);
-
-  // ── Forcer le recalcul des formules à l'ouverture ──
+/* Force le recalcul des formules à l'ouverture + retire les entrées
+   de dossier ajoutées par JSZip. */
+async function finalizeZip(zip) {
   let wb = await zip.file("xl/workbook.xml").async("string");
   if (/<calcPr[^>]*\/>/.test(wb)) {
     wb = wb.replace(/<calcPr([^>]*?)\/>/, (m, a) =>
       a.includes("fullCalcOnLoad") ? m : `<calcPr${a} fullCalcOnLoad="1"/>`);
+    zip.file("xl/workbook.xml", wb);
   }
-  zip.file("xl/workbook.xml", wb);
-
-  // Supprimer les entrées de dossier ajoutées automatiquement par JSZip
-  // (inutiles en OOXML, absentes du fichier d'origine)
   for (const k of Object.keys(zip.files)) {
     if (zip.files[k].dir) delete zip.files[k];
   }
-
-  // ── Sauvegarde de la copie (entrées non modifiées préservées) ──
-  const buf = await zip.generateAsync({
+  return zip.generateAsync({
     type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 },
   });
+}
+
+function saveExport(buf, candidate, suffix) {
   const safe = (s) => String(s || "").replace(/[^a-z0-9_-]/gi, "_");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const fileName = `E6_${safe(candidate.nom)}_${safe(candidate.prenom)}_${sheetKey}_${stamp}.xlsx`;
+  const fileName = `E6_${safe(candidate.nom)}_${safe(candidate.prenom)}_${suffix}_${stamp}.xlsx`;
   const filePath = path.join(EXPORT_DIR, fileName);
   fs.writeFileSync(filePath, buf);
-
   return { filePath, fileName };
 }
 
-module.exports = { exportEvaluation };
+function loadCandidateZip(candidate) {
+  if (!candidate.excelPath || !fs.existsSync(candidate.excelPath)) {
+    throw new Error("Aucun fichier Excel associé à ce candidat.");
+  }
+  return JSZip.loadAsync(fs.readFileSync(candidate.excelPath));
+}
+
+/**
+ * Export d'un seul onglet.
+ * @param data { evaluation: {itemId:bool}, comment: string, settings: {academie, etablissement} }
+ */
+async function exportEvaluation(candidate, sheetKey, data) {
+  const cfg = SHEET_CONFIG[sheetKey];
+  if (!cfg) throw new Error("Onglet inconnu : " + sheetKey);
+  const zip = await loadCandidateZip(candidate);
+  const sheetPath = await resolveSheetPath(zip, cfg.name);
+  let xml = await zip.file(sheetPath).async("string");
+  xml = fillSheetXml(xml, sheetKey, candidate, data.evaluation, data.comment, data.settings);
+  zip.file(sheetPath, xml);
+  const buf = await finalizeZip(zip);
+  return saveExport(buf, candidate, sheetKey);
+}
+
+/**
+ * Export complet : remplit les 5 onglets avec les données disponibles.
+ * @param dataBySheet { [sheetKey]: { evaluation, comment } }, settings à part
+ */
+async function exportFull(candidate, dataBySheet, settings) {
+  const zip = await loadCandidateZip(candidate);
+  for (const sheetKey of SHEET_ORDER) {
+    const data = dataBySheet[sheetKey] || { evaluation: {}, comment: "" };
+    const sheetPath = await resolveSheetPath(zip, SHEET_CONFIG[sheetKey].name);
+    let xml = await zip.file(sheetPath).async("string");
+    xml = fillSheetXml(xml, sheetKey, candidate, data.evaluation, data.comment, settings);
+    zip.file(sheetPath, xml);
+  }
+  const buf = await finalizeZip(zip);
+  return saveExport(buf, candidate, "COMPLET");
+}
+
+module.exports = { exportEvaluation, exportFull };

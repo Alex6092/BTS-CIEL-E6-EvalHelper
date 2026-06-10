@@ -1,30 +1,11 @@
 # Évaluation E6 – BTS CIEL
 
-Application web de **saisie collaborative** des compétences E6, avec **report automatique** des notes dans les fichiers Excel des candidats.
-
-## Fonctionnalités
-
-- **Liste des candidats** : ajout, suppression, sélection pour la saisie.
-- **Association d'un fichier Excel** à un candidat, à tout moment (modifiable).
-- **Saisie hiérarchique** des compétences avec pastilles de couleur :
-  - 🔴 0 sous-critère coché → **Niveau 1**
-  - 🟡 1 sous-critère coché → **Niveau 2**
-  - 🔵 2 ou 3 sous-critères cochés → **Niveau 3**
-  - 🟢 Tous cochés → **Niveau 4**
-- **Critères « Savoir-être »** : regroupent les critères transversaux de chaque compétence.
-- **Synchronisation temps réel** (WebSocket) : plusieurs évaluateurs peuvent noter le **même candidat** simultanément.
-- **Choix de l'onglet** de report : `E6 REVUES - IR - R3` ou `E6 SOUTENANCE - IR`.
-- **Export Excel** : génère une **copie** du fichier du candidat avec les croix (`x`) placées dans la bonne colonne (C/D/E/F) de la bonne ligne. Le fichier d'origine n'est pas modifié. Les formules Excel (totaux, notes) restent intactes et se recalculent à l'ouverture.
-
-## Installation
-
-```bash
-npm install
-```
+Application web de **saisie collaborative** des évaluations de l'épreuve E6 (stage, revues de projet, soutenance), avec **comptes utilisateurs**, **commissions** et **report automatique** dans les fichiers Excel des candidats.
 
 ## Démarrage
 
 ```bash
+npm install
 npm start
 ```
 
@@ -35,41 +16,60 @@ Le serveur affiche les adresses d'accès :
 ➜  Réseau  : http://192.168.x.x:3000     ← à donner aux autres évaluateurs (même réseau)
 ```
 
+Au **premier lancement**, un compte administrateur est créé : **admin / admin** (affiché dans la console). Changez ce mot de passe depuis le panneau d'administration.
+
 Pour changer le port : `PORT=8080 npm start`.
 
-## Utilisation
+## Rôles et droits
 
-1. **Ajouter** les candidats (bouton « + Ajouter un candidat »).
-2. Pour chaque candidat, **associer son fichier Excel** (« Associer Excel »).
-   - Le fichier doit contenir les onglets `E6 REVUES - IR - R3` et/ou `E6 SOUTENANCE - IR`.
-3. Cliquer sur **« Noter »** pour ouvrir la grille.
-4. Choisir l'**onglet de report** (R3 ou Soutenance) en haut à droite.
-5. Cocher les sous-critères : les pastilles et la progression se mettent à jour, et sont **partagées en direct** avec les autres évaluateurs connectés au même candidat + onglet.
-6. Cliquer sur **« Exporter Excel »** pour télécharger le fichier rempli.
+| | Membre de commission | Enseignant établissement | Administrateur |
+|---|---|---|---|
+| Candidats visibles | Ceux de ses commissions | Tous | Tous |
+| Onglets accessibles | Soutenance uniquement | Les 5 | Les 5 |
+| Créer / modifier candidats | — | ✓ | ✓ |
+| Associer un Excel | — | ✓ | ✓ |
+| Export d'un onglet | Soutenance | ✓ | ✓ |
+| Export complet (5 onglets) | — | ✓ | ✓ |
+| Comptes, commissions, paramètres | — | — | ✓ |
+
+**Pourquoi ?** La soutenance est menée par un jury externe (la commission) qui ne doit pas être influencé par les notes des autres oraux : il ne voit que la saisie soutenance. L'établissement trace tous les oraux et génère l'Excel final complet — c'est l'Excel qui calcule la note.
+
+## Les 5 onglets
+
+| Onglet | Grille | Particularités |
+|---|---|---|
+| Stage | `E6 STAGE - IR` | Lignes décalées, observables spécifiques au stage, C08 à 3 critères |
+| Revue 1 | `E6 REVUES - IR - R1` | **C08 et C10 non évalués** (zones « NON EVALUE » du template préservées) |
+| Revue 2 | `E6 REVUES - IR - R2` | Grille standard |
+| Revue 3 | `E6 REVUES - IR - R3` | Grille standard |
+| Soutenance | `E6 SOUTENANCE - IR` | Grille standard — seul onglet visible des commissions |
+
+Les **observables** (sous-critères) de chaque grille ont été extraits des commentaires de cellules du template Excel. Les critères transversaux sont regroupés sous **« Savoir-être »** (une ligne Excel par compétence).
+
+## Saisie
+
+- Pastilles : 🔴 0 coché → Niveau 1 (col. C) · 🟡 1 → Niveau 2 (D) · 🔵 2+ → Niveau 3 (E) · 🟢 tous → Niveau 4 (F)
+- **Synchronisation temps réel** (WebSocket) entre tous les évaluateurs sur le même candidat + onglet
+- **Commentaire par onglet**, synchronisé lui aussi, reporté dans la case commentaire de l'Excel
+
+## Export Excel
+
+- **Exporter cet onglet** : remplit l'onglet courant (croix, commentaire, nom/prénom/numéro/date, académie/établissement)
+- **Exporter tout** (enseignant/admin) : remplit les 5 onglets d'un coup — l'Excel calcule la note finale
+- L'export est une **copie** : le fichier associé au candidat n'est jamais modifié
+- Édition chirurgicale du zip (JSZip) : dessins, plages nommées, formules et fusions restent intacts ; les formules se recalculent à l'ouverture
 
 ## Architecture
 
 | Fichier | Rôle |
 |---|---|
-| `server.js` | Serveur Express + WebSocket + API REST |
-| `db.js` | Base de données SQLite (`data/evaluations.db`) |
-| `excel.js` | Génération de la copie Excel remplie (édition chirurgicale du zip via JSZip : seul l'onglet ciblé est modifié, dessins/plages nommées/formules intacts) |
-| `hierarchy.js` | Données partagées : compétences + mapping lignes/colonnes Excel |
-| `public/` | Frontend (HTML / CSS / JS) |
+| `server.js` | Express + WebSocket + API REST + contrôle d'accès |
+| `auth.js` | Mots de passe (scrypt), sessions cookie, rôles |
+| `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, comptes, commissions, paramètres |
+| `excel.js` | Génération des copies Excel remplies |
+| `hierarchy.js` | Grilles des 5 onglets + mapping lignes/colonnes Excel |
+| `public/` | Frontend (login, candidats, saisie, administration) |
 | `uploads/` | Fichiers Excel associés aux candidats |
 | `exports/` | Copies générées à télécharger |
 
-## Mapping Excel
-
-Les colonnes de la grille correspondent au nombre d'observables, identique aux pastilles :
-
-| Pastille | Sous-critères cochés | Colonne Excel | Niveau |
-|---|---|---|---|
-| 🔴 Rouge | 0 | C | Niveau 1 – Non réalisé |
-| 🟡 Jaune | 1 | D | Niveau 2 – Réalisation partielle |
-| 🔵 Bleu | 2 à 3 | E | Niveau 3 – Réalisation satisfaisante |
-| 🟢 Vert | tous (4) | F | Niveau 4 – Réalisation très satisfaisante |
-
-Les infos candidat (Nom, Prénom, Numéro, Date) sont écrites en E9/E10/E11/E12.
-
-> **Note** : `todo.html` est l'ancienne version statique (page unique), conservée pour référence. L'application actuelle se lance via `npm start`.
+> **Note** : `todo.html` est l'ancienne version statique, conservée pour référence.

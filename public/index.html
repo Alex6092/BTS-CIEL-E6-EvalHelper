@@ -8,22 +8,50 @@
 </head>
 <body>
 
-<div id="conn-status">● Hors ligne</div>
+<div id="conn-status" class="hidden">● Hors ligne</div>
+
+<!-- ════════════ Bandeau utilisateur ════════════ -->
+<div id="userbar" class="hidden">
+  <span id="ub-name"></span>
+  <span id="ub-role" class="role-tag"></span>
+  <button class="btn btn-outline btn-sm hidden" id="btn-admin">⚙ Administration</button>
+  <button class="btn btn-outline btn-sm" id="btn-logout">Déconnexion</button>
+</div>
 
 <header>
   <h1>📋 Évaluation E6 – BTS CIEL</h1>
   <p>Saisie collaborative des compétences &amp; report Excel</p>
 </header>
 
+<!-- ════════════ ÉCRAN LOGIN ════════════ -->
+<div id="screen-login" class="hidden">
+  <div class="card login-card">
+    <h2>Connexion</h2>
+    <form id="login-form">
+      <div class="field">
+        <label for="login-user">Identifiant</label>
+        <input id="login-user" type="text" autocomplete="username" required />
+      </div>
+      <div class="field">
+        <label for="login-pass">Mot de passe</label>
+        <input id="login-pass" type="password" autocomplete="current-password" required />
+      </div>
+      <button class="btn btn-primary" type="submit">Se connecter</button>
+      <div id="login-error" class="form-error"></div>
+    </form>
+  </div>
+</div>
+
 <!-- ════════════ ÉCRAN 1 : CANDIDATS ════════════ -->
-<div id="screen-candidates">
+<div id="screen-candidates" class="hidden">
   <div class="section-title">
     <h2>Candidats</h2>
-    <button class="btn btn-primary" id="btn-toggle-add">+ Ajouter un candidat</button>
+    <button class="btn btn-primary hidden" id="btn-toggle-add">+ Ajouter un candidat</button>
   </div>
 
   <div class="card">
     <form id="add-form">
+      <input type="hidden" id="in-edit-id" value="" />
       <div class="field">
         <label for="in-nom">Nom *</label>
         <input id="in-nom" type="text" autocomplete="off" required />
@@ -36,7 +64,8 @@
         <label for="in-numero">Numéro candidat</label>
         <input id="in-numero" type="text" autocomplete="off" />
       </div>
-      <button class="btn btn-success" type="submit">Enregistrer</button>
+      <button class="btn btn-success" type="submit" id="add-submit">Enregistrer</button>
+      <button class="btn btn-outline" type="button" id="add-cancel">Annuler</button>
     </form>
   </div>
 
@@ -52,10 +81,11 @@
       <div class="meta" id="g-meta"></div>
     </div>
     <div class="sheet-field">
-      <label for="sheet-select">Onglet de report</label>
+      <label for="sheet-select">Onglet de saisie</label>
       <select id="sheet-select"></select>
     </div>
-    <button class="btn btn-success" id="btn-export">⬇ Exporter Excel</button>
+    <button class="btn btn-success" id="btn-export">⬇ Exporter cet onglet</button>
+    <button class="btn btn-primary hidden" id="btn-export-full">⬇ Exporter tout</button>
   </div>
 
   <div id="global-progress-wrap">
@@ -67,8 +97,14 @@
     <strong style="color:var(--text)">Légende :</strong>
     <span class="legend-item"><span class="legend-dot" style="background:#ef4444;box-shadow:0 0 0 2px #fecaca"></span> 0 coché → Niveau 1</span>
     <span class="legend-item"><span class="legend-dot" style="background:#eab308;box-shadow:0 0 0 2px #fef08a"></span> 1 coché → Niveau 2</span>
-    <span class="legend-item"><span class="legend-dot" style="background:#3b82f6;box-shadow:0 0 0 2px #bfdbfe"></span> 2-3 cochés → Niveau 3</span>
+    <span class="legend-item"><span class="legend-dot" style="background:#3b82f6;box-shadow:0 0 0 2px #bfdbfe"></span> 2+ cochés → Niveau 3</span>
     <span class="legend-item"><span class="legend-dot" style="background:#22c55e;box-shadow:0 0 0 2px #bbf7d0"></span> Tous cochés → Niveau 4</span>
+  </div>
+
+  <div class="card comment-card">
+    <label for="comment-input">💬 Commentaire (reporté dans l'Excel — obligatoire si note finale &lt; 10/20)</label>
+    <textarea id="comment-input" rows="3" placeholder="Commentaire pour cet onglet…"></textarea>
+    <div class="comment-status" id="comment-status"></div>
   </div>
 
   <div style="max-width:880px;margin:0 auto 1rem;display:flex;gap:.6rem;justify-content:flex-end">
@@ -79,12 +115,75 @@
   <div id="app"></div>
 </div>
 
-<div id="toast"></div>
+<!-- ════════════ ÉCRAN 3 : ADMINISTRATION ════════════ -->
+<div id="screen-admin" class="hidden">
+  <div class="section-title">
+    <h2>Administration</h2>
+    <button class="btn btn-outline btn-sm" id="btn-admin-back">← Retour</button>
+  </div>
 
-<!-- hidden file input for excel association -->
+  <!-- Paramètres -->
+  <div class="card admin-card">
+    <h3>🏫 Paramètres de l'établissement</h3>
+    <form id="settings-form" class="inline-form">
+      <div class="field">
+        <label for="set-academie">Académie</label>
+        <input id="set-academie" type="text" />
+      </div>
+      <div class="field">
+        <label for="set-etablissement">Établissement</label>
+        <input id="set-etablissement" type="text" />
+      </div>
+      <button class="btn btn-success" type="submit">Enregistrer</button>
+    </form>
+  </div>
+
+  <!-- Utilisateurs -->
+  <div class="card admin-card">
+    <h3>👤 Comptes utilisateurs</h3>
+    <form id="user-form" class="inline-form">
+      <div class="field">
+        <label for="u-username">Identifiant *</label>
+        <input id="u-username" type="text" required autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="u-display">Nom affiché</label>
+        <input id="u-display" type="text" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="u-password">Mot de passe *</label>
+        <input id="u-password" type="text" required autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="u-role">Rôle *</label>
+        <select id="u-role">
+          <option value="commission">Membre de commission</option>
+          <option value="teacher">Enseignant établissement</option>
+          <option value="admin">Administrateur</option>
+        </select>
+      </div>
+      <button class="btn btn-success" type="submit">Créer</button>
+    </form>
+    <div id="user-list" class="admin-list"></div>
+  </div>
+
+  <!-- Commissions -->
+  <div class="card admin-card">
+    <h3>⚖ Commissions (jurys de soutenance)</h3>
+    <form id="commission-form" class="inline-form">
+      <div class="field">
+        <label for="comm-name">Nom de la commission *</label>
+        <input id="comm-name" type="text" required autocomplete="off" />
+      </div>
+      <button class="btn btn-success" type="submit">Créer</button>
+    </form>
+    <div id="commission-list" class="admin-list"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
 <input type="file" id="excel-input" accept=".xlsx" class="hidden" />
 
-<script src="/hierarchy.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
