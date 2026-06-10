@@ -6,3 +6,4 @@ uploads/*
 exports/*
 !uploads/.gitkeep
 !exports/.gitkeep
+.claude/*

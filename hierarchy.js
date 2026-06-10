@@ -14,7 +14,11 @@
 
 /* ── Configuration par onglet ──
    info : cellules où écrire les en-têtes (haut-gauche des fusions)
-   commentCell : cellule du commentaire (sous le libellé "Commentaire ...") */
+   commentCell : cellule du commentaire (sous le libellé "Commentaire ...")
+   Toutes grilles : bonus en C63, note proposée au jury en C64. */
+const BONUS_CELL = "C63";
+const NOTE_CELL = "C64";
+
 const SHEET_CONFIG = {
   STAGE: {
     name: "E6 STAGE - IR", label: "Stage",
@@ -491,6 +495,38 @@ const HIERARCHIES = {
   SO: BASE_HIERARCHY,
 };
 
+/* ════════════════ Poids (extraits du template Excel) ════════════════
+   note = Σ_comp [poids_comp × Σ_crit (poids_crit × niveau 0-3)] × 20/3 + bonus
+   (réplique exacte de la formule F64 du classeur) */
+
+// Poids des compétences (colonne A des lignes d'en-tête), par onglet
+const COMP_WEIGHTS = {
+  STAGE: { C01: 0.4, C03: 0.2,  C08: 0.2,  C10: 0.2  },
+  R1:    { C01: 0.3, C03: 0.7 },                       // C08/C10 non évalués (poids 0)
+  R2:    { C01: 0.2, C03: 0.2,  C08: 0.45, C10: 0.15 },
+  R3:    { C01: 0.2, C03: 0.15, C08: 0.4,  C10: 0.25 },
+  SO:    { C01: 0.3, C03: 0.15, C08: 0.3,  C10: 0.25 },
+};
+
+// Poids des critères (colonne A des lignes de critère).
+// Identiques pour R1/R2/R3/SO ; spécifiques pour STAGE.
+const CRIT_WEIGHTS_BASE = {
+  "C01-1": 0.2, "C01-2": 0.2, "C01-3": 0.2, "C01-4": 0.2, "C01-SE": 0.2,
+  "C03-1": 0.1, "C03-2": 0.1, "C03-3": 0.1, "C03-4": 0.4, "C03-SE": 0.3,
+  "C08-1": 0.05, "C08-2": 0.15, "C08-3": 0.2, "C08-4": 0.4, "C08-SE": 0.2,
+  "C10-1": 0.1, "C10-2": 0.3, "C10-3": 0.2, "C10-4": 0.2, "C10-SE": 0.2,
+};
+const CRIT_WEIGHTS_STAGE = {
+  "C01-1": 0.2, "C01-2": 0.2, "C01-3": 0.2, "C01-4": 0.2, "C01-SE": 0.2,
+  "C03-1": 0.2, "C03-2": 0.2, "C03-3": 0.2, "C03-4": 0.2, "C03-SE": 0.2,
+  "C08-1": 0.3, "C08-2": 0.2, "C08-3": 0.3, "C08-SE": 0.2,
+  "C10-1": 0.2, "C10-2": 0.2, "C10-3": 0.2, "C10-4": 0.2, "C10-SE": 0.2,
+};
+
+function critWeights(sheetKey) {
+  return sheetKey === "STAGE" ? CRIT_WEIGHTS_STAGE : CRIT_WEIGHTS_BASE;
+}
+
 /* Pastille / colonne Excel à partir du nombre de sous-critères cochés.
    0 -> rouge / C (Niveau 1)
    1 -> jaune / D (Niveau 2)
@@ -503,6 +539,28 @@ function computeLevel(checkedCount, total) {
   return { color: "blue", col: "E", level: 3 };
 }
 
+/* Note calculée (comme F64 du classeur) + note proposée au jury
+   (arrondi au demi-point SUPÉRIEUR). */
+function computeNote(sheetKey, evaluation, bonus) {
+  const weights = critWeights(sheetKey);
+  let note = 0;
+  for (const section of (HIERARCHIES[sheetKey] || [])) {
+    const compW = COMP_WEIGHTS[sheetKey][section.id] || 0;
+    let totalComp = 0;
+    for (const item of section.items) {
+      const total = (item.children || []).length;
+      const checked = (item.children || []).filter(c => evaluation[c.id]).length;
+      const niveau = computeLevel(checked, total).level - 1; // 0..3
+      totalComp += (weights[item.id] || 0) * niveau;
+    }
+    note += compW * totalComp;
+  }
+  note = note * 20 / 3 + (Number(bonus) || 0);
+  note = Math.round(note * 100) / 100; // élimine le bruit flottant
+  const noteProposee = Math.max(0, Math.ceil(note * 2 - 1e-9) / 2); // évite -0
+  return { note, noteProposee };
+}
+
 /* IDs valides (feuilles) pour un onglet donné */
 function allLeafIds(sheetKey) {
   const ids = new Set();
@@ -513,4 +571,8 @@ function allLeafIds(sheetKey) {
   return ids;
 }
 
-module.exports = { SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, computeLevel, allLeafIds };
+module.exports = {
+  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
+  COMP_WEIGHTS, critWeights, BONUS_CELL, NOTE_CELL,
+  computeLevel, computeNote, allLeafIds,
+};

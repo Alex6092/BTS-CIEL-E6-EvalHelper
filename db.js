@@ -38,6 +38,7 @@ db.exec(`
     candidateId INTEGER NOT NULL,
     sheet       TEXT NOT NULL,
     text        TEXT NOT NULL DEFAULT '',
+    bonus       REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (candidateId, sheet),
     FOREIGN KEY (candidateId) REFERENCES candidates(id) ON DELETE CASCADE
   );
@@ -87,6 +88,9 @@ db.exec(`
   );
 `);
 
+// Migration : colonne bonus sur les bases créées avant son ajout
+try { db.exec("ALTER TABLE comments ADD COLUMN bonus REAL NOT NULL DEFAULT 0"); } catch {}
+
 const q = {
   // ── Candidats ──
   listCandidates:  db.prepare("SELECT * FROM candidates ORDER BY nom, prenom"),
@@ -110,11 +114,15 @@ const q = {
     ON CONFLICT(candidateId, sheet, itemId) DO UPDATE SET checked = @checked
   `),
 
-  // ── Commentaires ──
-  getComment: db.prepare("SELECT text FROM comments WHERE candidateId = ? AND sheet = ?"),
+  // ── Commentaires + bonus ──
+  getExtra: db.prepare("SELECT text, bonus FROM comments WHERE candidateId = ? AND sheet = ?"),
   setComment: db.prepare(`
     INSERT INTO comments (candidateId, sheet, text) VALUES (?, ?, ?)
     ON CONFLICT(candidateId, sheet) DO UPDATE SET text = excluded.text
+  `),
+  setBonus: db.prepare(`
+    INSERT INTO comments (candidateId, sheet, bonus) VALUES (?, ?, ?)
+    ON CONFLICT(candidateId, sheet) DO UPDATE SET bonus = excluded.bonus
   `),
 
   // ── Utilisateurs ──
@@ -199,12 +207,13 @@ module.exports = {
     q.setEval.run({ candidateId, sheet, itemId, checked: checked ? 1 : 0 });
   },
 
-  // Commentaires
-  getComment: (candidateId, sheet) => {
-    const r = q.getComment.get(candidateId, sheet);
-    return r ? r.text : "";
+  // Commentaires + bonus — retourne { text, bonus }
+  getExtra: (candidateId, sheet) => {
+    const r = q.getExtra.get(candidateId, sheet);
+    return r ? { text: r.text, bonus: r.bonus } : { text: "", bonus: 0 };
   },
   setComment: (candidateId, sheet, text) => q.setComment.run(candidateId, sheet, String(text || "")),
+  setBonus: (candidateId, sheet, bonus) => q.setBonus.run(candidateId, sheet, Number(bonus) || 0),
 
   // Utilisateurs
   listUsers: () => q.listUsers.all(),

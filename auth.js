@@ -79,6 +79,15 @@ function canAccessSheet(user, sheetKey) {
   return allowedSheets(user).includes(sheetKey);
 }
 
+/* Écriture (saisie, commentaire, bonus) :
+   - SO : UNIQUEMENT les membres de commission (le jury externe ne doit
+     pas pouvoir être « corrigé » par l'établissement, même par un admin)
+   - autres onglets : enseignants et admin */
+function canEditSheet(user, sheetKey) {
+  if (sheetKey === "SO") return user.role === "commission";
+  return user.role === "admin" || user.role === "teacher";
+}
+
 function canAccessCandidate(user, candidateId) {
   if (user.role === "admin" || user.role === "teacher") return true;
   return store.userCanSeeCandidate(user.id, Number(candidateId));
@@ -97,6 +106,6 @@ module.exports = {
   hashPassword, verifyPassword,
   createSession, userFromRequest,
   requireAuth, requireRole,
-  allowedSheets, canAccessSheet, canAccessCandidate,
+  allowedSheets, canAccessSheet, canEditSheet, canAccessCandidate,
   ensureDefaultAdmin,
 };

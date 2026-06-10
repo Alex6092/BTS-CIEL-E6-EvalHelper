@@ -11,8 +11,11 @@ const { WebSocketServer } = require("ws");
 
 const store = require("./db");
 const auth = require("./auth");
-const { exportEvaluation, exportFull } = require("./excel");
-const { SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, allLeafIds } = require("./hierarchy");
+const { exportEvaluation, exportFull, exportAll } = require("./excel");
+const {
+  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
+  COMP_WEIGHTS, critWeights, allLeafIds,
+} = require("./hierarchy");
 
 const PORT = process.env.PORT || 3000;
 const UPLOAD_DIR = path.join(__dirname, "uploads");
@@ -87,12 +90,14 @@ app.get("/api/hierarchy", auth.requireAuth, (req, res) => {
   const allowed = auth.allowedSheets(req.user);
   const sheets = {};
   const hierarchies = {};
+  const weights = {};
   for (const key of SHEET_ORDER) {
     if (!allowed.includes(key)) continue;
     sheets[key] = { label: SHEET_CONFIG[key].label, name: SHEET_CONFIG[key].name };
     hierarchies[key] = HIERARCHIES[key];
+    weights[key] = { comp: COMP_WEIGHTS[key], crit: critWeights(key) };
   }
-  res.json({ sheets, hierarchies, order: SHEET_ORDER.filter(k => allowed.includes(k)) });
+  res.json({ sheets, hierarchies, weights, order: SHEET_ORDER.filter(k => allowed.includes(k)) });
 });
 
 /* ════════════════ Candidats ════════════════ */
@@ -150,9 +155,12 @@ app.get("/api/evaluation", auth.requireAuth, (req, res) => {
   if (!SHEET_CONFIG[sheet]) return res.status(400).json({ error: "Onglet invalide." });
   if (!auth.canAccessSheet(req.user, sheet)) return res.status(403).json({ error: "Accès refusé à cet onglet." });
   if (!auth.canAccessCandidate(req.user, candidateId)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
+  const extra = store.getExtra(candidateId, sheet);
   res.json({
     state: store.getEvaluation(candidateId, sheet),
-    comment: store.getComment(candidateId, sheet),
+    comment: extra.text,
+    bonus: extra.bonus,
+    canEdit: auth.canEditSheet(req.user, sheet),
   });
 });
 
@@ -166,9 +174,11 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
     if (!auth.canAccessCandidate(req.user, candidateId)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
     const candidate = store.getCandidate(Number(candidateId));
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
+    const extra = store.getExtra(candidate.id, sheet);
     const { fileName } = await exportEvaluation(candidate, sheet, {
       evaluation: store.getEvaluation(candidate.id, sheet),
-      comment: store.getComment(candidate.id, sheet),
+      comment: extra.text,
+      bonus: extra.bonus,
       settings: getSettings(),
     });
     res.json({ downloadUrl: "/download/" + encodeURIComponent(fileName), fileName });
@@ -177,19 +187,44 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
   }
 });
 
+function fullDataFor(candidateId) {
+  const dataBySheet = {};
+  for (const key of SHEET_ORDER) {
+    const extra = store.getExtra(candidateId, key);
+    dataBySheet[key] = {
+      evaluation: store.getEvaluation(candidateId, key),
+      comment: extra.text,
+      bonus: extra.bonus,
+    };
+  }
+  return dataBySheet;
+}
+
 app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, res) => {
   try {
     const candidate = store.getCandidate(Number((req.body || {}).candidateId));
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
-    const dataBySheet = {};
-    for (const key of SHEET_ORDER) {
-      dataBySheet[key] = {
-        evaluation: store.getEvaluation(candidate.id, key),
-        comment: store.getComment(candidate.id, key),
-      };
-    }
-    const { fileName } = await exportFull(candidate, dataBySheet, getSettings());
+    const { fileName } = await exportFull(candidate, fullDataFor(candidate.id), getSettings());
     res.json({ downloadUrl: "/download/" + encodeURIComponent(fileName), fileName });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Export groupé : tous les candidats ayant un Excel associé, dans un zip
+app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (_req, res) => {
+  try {
+    const all = store.listCandidates();
+    const withExcel = all.filter(c => c.excelPath && fs.existsSync(c.excelPath));
+    if (!withExcel.length) {
+      return res.status(400).json({ error: "Aucun candidat n'a de fichier Excel associé." });
+    }
+    const entries = withExcel.map(candidate => ({ candidate, dataBySheet: fullDataFor(candidate.id) }));
+    const { fileName, count } = await exportAll(entries, getSettings());
+    res.json({
+      downloadUrl: "/download/" + encodeURIComponent(fileName),
+      fileName, count, skipped: all.length - withExcel.length,
+    });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -318,15 +353,19 @@ wss.on("connection", (ws, req) => {
       ws.room = roomKey(candidateId, sheet);
       ws.candidateId = candidateId;
       ws.sheet = sheet;
+      const extra = store.getExtra(candidateId, sheet);
       ws.send(JSON.stringify({
         type: "state",
         state: store.getEvaluation(candidateId, sheet),
-        comment: store.getComment(candidateId, sheet),
+        comment: extra.text,
+        bonus: extra.bonus,
+        canEdit: auth.canEditSheet(ws.user, sheet),
       }));
     }
 
     else if (msg.type === "set") {
       if (!ws.room) return;
+      if (!auth.canEditSheet(ws.user, ws.sheet)) return; // SO : commissions uniquement
       const { candidateId, sheet } = ws;
       if (!VALID_IDS[sheet].has(msg.itemId)) return;
       const checked = !!msg.checked;
@@ -336,10 +375,20 @@ wss.on("connection", (ws, req) => {
 
     else if (msg.type === "comment") {
       if (!ws.room) return;
+      if (!auth.canEditSheet(ws.user, ws.sheet)) return;
       const text = String(msg.text || "").slice(0, 5000);
       store.setComment(ws.candidateId, ws.sheet, text);
       // Diffuser aux AUTRES clients de la salle (pas l'émetteur, qui tape)
       broadcastRoom(ws.room, { type: "comment", text }, ws);
+    }
+
+    else if (msg.type === "bonus") {
+      if (!ws.room) return;
+      if (!auth.canEditSheet(ws.user, ws.sheet)) return;
+      // Bonus sur 2 points, par pas libre, borné [0, 2]
+      const bonus = Math.max(0, Math.min(2, Number(msg.bonus) || 0));
+      store.setBonus(ws.candidateId, ws.sheet, bonus);
+      broadcastRoom(ws.room, { type: "bonus", bonus }, ws);
     }
   });
 });

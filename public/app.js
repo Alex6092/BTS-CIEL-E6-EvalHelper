@@ -21,11 +21,36 @@ const ROLE_LABELS = {
 let me = null;             // { user, allowedSheets }
 let HIERARCHIES = {};      // { sheetKey: sections }
 let SHEETS = {};           // { sheetKey: {label, name} }
+let WEIGHTS = {};          // { sheetKey: { comp: {C01:..}, crit: {itemId:..} } }
 let SHEET_LIST = [];       // ordre
 let current = { candidate: null, sheet: null };
 let state = {};            // { itemId: bool }
+let bonus = 0;             // points bonus de l'onglet courant
+let canEditCurrent = false;// droit d'écriture sur l'onglet courant
 let ws = null;
 let wsReady = false;
+
+/* Note calculée (réplique de la formule F64 du classeur) */
+function computeNoteClient(sheetKey, evaluation, bonusVal) {
+  const w = WEIGHTS[sheetKey];
+  if (!w) return { note: 0, noteProposee: 0 };
+  let note = 0;
+  for (const section of (HIERARCHIES[sheetKey] || [])) {
+    const compW = w.comp[section.id] || 0;
+    let totalComp = 0;
+    for (const item of section.items) {
+      const total = (item.children || []).length;
+      const checked = (item.children || []).filter(c => evaluation[c.id]).length;
+      const niveau = computeLevel(checked, total).level - 1; // 0..3
+      totalComp += (w.crit[item.id] || 0) * niveau;
+    }
+    note += compW * totalComp;
+  }
+  note = note * 20 / 3 + (Number(bonusVal) || 0);
+  note = Math.round(note * 100) / 100;
+  const noteProposee = Math.max(0, Math.ceil(note * 2 - 1e-9) / 2); // évite -0
+  return { note, noteProposee };
+}
 
 /* ════════════════ Helpers ════════════════ */
 const $ = (sel) => document.querySelector(sel);
@@ -84,11 +109,13 @@ async function enterApp() {
   $("#btn-admin").classList.toggle("hidden", !isAdmin());
   $("#btn-toggle-add").classList.toggle("hidden", !canEdit());
   $("#btn-export-full").classList.toggle("hidden", !canEdit());
+  $("#btn-export-all").classList.toggle("hidden", !canEdit());
 
   // Hiérarchies + onglets autorisés
   const h = await api("/api/hierarchy");
   HIERARCHIES = h.hierarchies;
   SHEETS = h.sheets;
+  WEIGHTS = h.weights || {};
   SHEET_LIST = h.order;
   const sel = $("#sheet-select");
   sel.innerHTML = "";
@@ -123,6 +150,10 @@ function connectWS() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "state") {
       state = msg.state || {};
+      bonus = Number(msg.bonus) || 0;
+      canEditCurrent = !!msg.canEdit;
+      $("#bonus-input").value = bonus;
+      applyEditability();
       renderGridState();
       setCommentValue(msg.comment || "", true);
     } else if (msg.type === "update") {
@@ -130,6 +161,10 @@ function connectWS() {
       applyLeafUpdate(msg.itemId);
     } else if (msg.type === "comment") {
       setCommentValue(msg.text || "", false);
+    } else if (msg.type === "bonus") {
+      bonus = Number(msg.bonus) || 0;
+      if (document.activeElement !== $("#bonus-input")) $("#bonus-input").value = bonus;
+      refreshNote();
     } else if (msg.type === "candidates") {
       if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
     }
@@ -312,6 +347,22 @@ function bindUI() {
 
   $("#btn-export").onclick = () => exportExcel(false);
   $("#btn-export-full").onclick = () => exportExcel(true);
+  $("#btn-export-all").onclick = exportAllExcel;
+
+  // Points bonus : envoi avec debounce
+  const bonusInput = $("#bonus-input");
+  bonusInput.addEventListener("input", () => {
+    if (!canEditCurrent) return;
+    let v = Math.max(0, Math.min(2, Number(bonusInput.value) || 0));
+    bonus = v;
+    refreshNote();
+    clearTimeout(bonusInput._t);
+    bonusInput._t = setTimeout(() => {
+      if (!wsReady) { toast("Hors ligne — bonus non synchronisé", "error"); return; }
+      ws.send(JSON.stringify({ type: "bonus", bonus: v }));
+    }, 400);
+  });
+  bonusInput.addEventListener("blur", () => { bonusInput.value = bonus; });
 
   // Commentaire : envoi avec debounce
   const commentInput = $("#comment-input");
@@ -329,6 +380,22 @@ function bindUI() {
   $("#settings-form").onsubmit = saveSettings;
   $("#user-form").onsubmit = createUser;
   $("#commission-form").onsubmit = createCommission;
+}
+
+/* Active / désactive la saisie selon le droit d'écriture sur l'onglet courant */
+function applyEditability() {
+  $("#readonly-banner").classList.toggle("hidden", canEditCurrent);
+  $("#app").classList.toggle("readonly", !canEditCurrent);
+  $("#comment-input").disabled = !canEditCurrent;
+  $("#bonus-input").disabled = !canEditCurrent;
+}
+
+/* Met à jour l'affichage de la note calculée / proposée */
+function refreshNote() {
+  const { note, noteProposee } = computeNoteClient(current.sheet, state, bonus);
+  const fr = (n, dec) => n.toLocaleString("fr-FR", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  $("#note-calc").textContent = fr(note, 2) + " / 20";
+  $("#note-prop").textContent = fr(noteProposee, 1) + " / 20";
 }
 
 /* Mise à jour du commentaire reçue du serveur.
@@ -362,6 +429,8 @@ function buildGrid() {
   const app = $("#app");
   app.innerHTML = "";
   state = {};
+  bonus = 0;
+  $("#bonus-input").value = 0;
   $("#comment-input").value = "";
   $("#comment-status").textContent = "";
 
@@ -418,7 +487,11 @@ function buildGrid() {
         ccb.onclick = (e) => e.stopPropagation();
         ccb.onchange = () => onChildToggle(item, child, ccb.checked);
         const span = el("span", "child-text"); span.textContent = child.text;
-        li.onclick = () => { ccb.checked = !ccb.checked; onChildToggle(item, child, ccb.checked); };
+        li.onclick = () => {
+          if (!canEditCurrent) return;
+          ccb.checked = !ccb.checked;
+          onChildToggle(item, child, ccb.checked);
+        };
         li.append(ccb, span);
         ul.appendChild(li);
       });
@@ -435,6 +508,7 @@ function buildGrid() {
 
 /* ── Toggles ── */
 function onParentToggle(item, checked) {
+  if (!canEditCurrent) { renderGridState(); return; }
   (item.children || []).forEach(child => {
     state[child.id] = checked;
     const ccb = document.getElementById("cb-" + child.id);
@@ -448,6 +522,7 @@ function onParentToggle(item, checked) {
 }
 
 function onChildToggle(item, child, checked) {
+  if (!canEditCurrent) { renderGridState(); return; }
   state[child.id] = checked;
   updateChildText(child.id, checked);
   sendSet(child.id, checked);
@@ -535,6 +610,7 @@ function refreshGlobal() {
   const pct = total ? Math.round(done / total * 100) : 0;
   $("#global-fill").style.width = pct + "%";
   $("#global-percent").textContent = pct;
+  refreshNote();
 }
 
 function sectionOf(itemId) {
@@ -568,6 +644,20 @@ async function exportExcel(full) {
     a.href = res.downloadUrl; a.download = res.fileName;
     document.body.appendChild(a); a.click(); a.remove();
     toast("Export prêt ✓ (" + res.fileName + ")", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* Export groupé : tous les candidats ayant un Excel, dans un zip */
+async function exportAllExcel() {
+  if (!confirm("Générer l'export complet de tous les candidats ayant un fichier Excel associé ?")) return;
+  try {
+    toast("Génération de tous les exports en cours…");
+    const res = await api("/api/export-all", { method: "POST" });
+    const a = document.createElement("a");
+    a.href = res.downloadUrl; a.download = res.fileName;
+    document.body.appendChild(a); a.click(); a.remove();
+    const skippedMsg = res.skipped ? ` (${res.skipped} candidat(s) sans Excel ignoré(s))` : "";
+    toast(`${res.count} fichier(s) exporté(s) ✓${skippedMsg}`, "success");
   } catch (e) { toast(e.message, "error"); }
 }
 

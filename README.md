@@ -26,13 +26,16 @@ Pour changer le port : `PORT=8080 npm start`.
 |---|---|---|---|
 | Candidats visibles | Ceux de ses commissions | Tous | Tous |
 | Onglets accessibles | Soutenance uniquement | Les 5 | Les 5 |
+| **Saisie Soutenance** | **✓ (exclusif)** | lecture seule | lecture seule |
+| Saisie Stage / Revues | — | ✓ | ✓ |
 | Créer / modifier candidats | — | ✓ | ✓ |
 | Associer un Excel | — | ✓ | ✓ |
 | Export d'un onglet | Soutenance | ✓ | ✓ |
 | Export complet (5 onglets) | — | ✓ | ✓ |
+| **Export groupé (tous les candidats, zip)** | — | ✓ | ✓ |
 | Comptes, commissions, paramètres | — | — | ✓ |
 
-**Pourquoi ?** La soutenance est menée par un jury externe (la commission) qui ne doit pas être influencé par les notes des autres oraux : il ne voit que la saisie soutenance. L'établissement trace tous les oraux et génère l'Excel final complet — c'est l'Excel qui calcule la note.
+**Pourquoi ?** La soutenance est menée par un jury externe (la commission) qui ne doit pas être influencé par les notes des autres oraux : il ne voit que la saisie soutenance. Inversement, l'onglet Soutenance n'est **modifiable que par la commission** — l'établissement le voit en lecture seule, pour éviter toute altération de l'évaluation du jury. L'établissement trace tous les oraux et génère l'Excel final complet — c'est l'Excel qui calcule la note.
 
 ## Les 5 onglets
 
@@ -51,11 +54,16 @@ Les **observables** (sous-critères) de chaque grille ont été extraits des com
 - Pastilles : 🔴 0 coché → Niveau 1 (col. C) · 🟡 1 → Niveau 2 (D) · 🔵 2+ → Niveau 3 (E) · 🟢 tous → Niveau 4 (F)
 - **Synchronisation temps réel** (WebSocket) entre tous les évaluateurs sur le même candidat + onglet
 - **Commentaire par onglet**, synchronisé lui aussi, reporté dans la case commentaire de l'Excel
+- **Points bonus** (/2) par onglet, reportés en C63
+- **Note calculée** affichée en direct — réplique exacte de la formule du classeur :
+  `note = Σ(poids_compétence × Σ(poids_critère × niveau 0-3)) × 20/3 + bonus`
+- **Note proposée au jury** = arrondi au demi-point supérieur, écrite en C64 à l'export
 
 ## Export Excel
 
-- **Exporter cet onglet** : remplit l'onglet courant (croix, commentaire, nom/prénom/numéro/date, académie/établissement)
+- **Exporter cet onglet** : remplit l'onglet courant (croix, commentaire, bonus, note proposée, nom/prénom/numéro/date, académie/établissement)
 - **Exporter tout** (enseignant/admin) : remplit les 5 onglets d'un coup — l'Excel calcule la note finale
+- **Exporter tous les Excel** (écran candidats, enseignant/admin) : un zip contenant l'export complet de chaque candidat ayant un fichier Excel associé
 - L'export est une **copie** : le fichier associé au candidat n'est jamais modifié
 - Édition chirurgicale du zip (JSZip) : dessins, plages nommées, formules et fusions restent intacts ; les formules se recalculent à l'ouverture
 

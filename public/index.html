@@ -46,7 +46,10 @@
 <div id="screen-candidates" class="hidden">
   <div class="section-title">
     <h2>Candidats</h2>
-    <button class="btn btn-primary hidden" id="btn-toggle-add">+ Ajouter un candidat</button>
+    <div style="display:flex;gap:.6rem">
+      <button class="btn btn-success hidden" id="btn-export-all">⬇ Exporter tous les Excel</button>
+      <button class="btn btn-primary hidden" id="btn-toggle-add">+ Ajouter un candidat</button>
+    </div>
   </div>
 
   <div class="card">
@@ -88,9 +91,28 @@
     <button class="btn btn-primary hidden" id="btn-export-full">⬇ Exporter tout</button>
   </div>
 
+  <div id="readonly-banner" class="readonly-banner hidden">
+    🔒 Lecture seule — l'onglet Soutenance n'est modifiable que par les membres de la commission d'évaluation.
+  </div>
+
   <div id="global-progress-wrap">
     <div class="progress-bar-bg"><div class="progress-bar-fill" id="global-fill" style="width:0%"></div></div>
     <span><span id="global-percent">0</span> %</span>
+  </div>
+
+  <div class="card note-card">
+    <div class="note-item">
+      <label for="bonus-input">Points bonus <span class="sub">/ 2</span></label>
+      <input id="bonus-input" type="number" min="0" max="2" step="0.5" value="0" />
+    </div>
+    <div class="note-item note-display">
+      <span class="note-label">Note calculée</span>
+      <span class="note-value" id="note-calc">0,00 / 20</span>
+    </div>
+    <div class="note-item note-display">
+      <span class="note-label">Note proposée au jury <span class="sub">(arrondi ½ pt sup.)</span></span>
+      <span class="note-value note-final" id="note-prop">0,0 / 20</span>
+    </div>
   </div>
 
   <div class="legend">

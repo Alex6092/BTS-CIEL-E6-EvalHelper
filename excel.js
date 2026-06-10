@@ -13,7 +13,10 @@
 const JSZip = require("jszip");
 const path = require("path");
 const fs = require("fs");
-const { SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, computeLevel } = require("./hierarchy");
+const {
+  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
+  computeLevel, computeNote, BONUS_CELL, NOTE_CELL,
+} = require("./hierarchy");
 
 const EXPORT_DIR = path.join(__dirname, "exports");
 if (!fs.existsSync(EXPORT_DIR)) fs.mkdirSync(EXPORT_DIR, { recursive: true });
@@ -42,6 +45,18 @@ function setCellString(xml, addr, value) {
   const m = xml.match(re);
   const sAttr = m ? ((m[1].match(/ s="\d+"/) || [""])[0]) : "";
   const cell = `<c r="${addr}"${sAttr} t="inlineStr"><is><t xml:space="preserve">${v}</t></is></c>`;
+  if (m) return xml.replace(re, cell);
+  return insertCell(xml, addr, cell);
+}
+
+// Écrit un NOMBRE dans une cellule (les formules du classeur référencent
+// C63 : il faut une vraie valeur numérique, pas une chaîne)
+function setCellNumber(xml, addr, value) {
+  const n = Number(value) || 0;
+  const re = findCellRe(addr);
+  const m = xml.match(re);
+  const sAttr = m ? ((m[1].match(/ s="\d+"/) || [""])[0]) : "";
+  const cell = `<c r="${addr}"${sAttr}><v>${n}</v></c>`;
   if (m) return xml.replace(re, cell);
   return insertCell(xml, addr, cell);
 }
@@ -91,9 +106,13 @@ async function resolveSheetPath(zip, sheetName) {
 }
 
 /* Remplit le XML d'un onglet : infos candidat, académie/établissement,
-   commentaire, croix des niveaux. */
-function fillSheetXml(xml, sheetKey, candidate, evaluation, comment, settings) {
+   commentaire, croix des niveaux, bonus et note proposée.
+   data = { evaluation: {itemId:bool}, comment: string, bonus: number } */
+function fillSheetXml(xml, sheetKey, candidate, data, settings) {
   const cfg = SHEET_CONFIG[sheetKey];
+  const evaluation = data.evaluation || {};
+  const comment = data.comment || "";
+  const bonus = Number(data.bonus) || 0;
 
   // En-têtes
   if (settings.academie)      xml = setCellString(xml, cfg.info.academie, settings.academie);
@@ -104,7 +123,7 @@ function fillSheetXml(xml, sheetKey, candidate, evaluation, comment, settings) {
   xml = setCellString(xml, cfg.info.date, new Date().toLocaleDateString("fr-FR"));
 
   // Commentaire (cellule fusionnée, texte multi-lignes accepté)
-  if (comment && comment.trim()) {
+  if (comment.trim()) {
     xml = setCellString(xml, cfg.commentCell, comment.trim());
   }
 
@@ -120,6 +139,13 @@ function fillSheetXml(xml, sheetKey, candidate, evaluation, comment, settings) {
       xml = setCellString(xml, col + row, "x");
     }
   }
+
+  // Points bonus (C63, numérique : utilisé par la formule F64)
+  xml = setCellNumber(xml, BONUS_CELL, bonus);
+  // Note proposée au jury (C64) = arrondi au demi-point supérieur
+  const { noteProposee } = computeNote(sheetKey, evaluation, bonus);
+  xml = setCellNumber(xml, NOTE_CELL, noteProposee);
+
   return xml;
 }
 
@@ -158,7 +184,8 @@ function loadCandidateZip(candidate) {
 
 /**
  * Export d'un seul onglet.
- * @param data { evaluation: {itemId:bool}, comment: string, settings: {academie, etablissement} }
+ * @param data { evaluation: {itemId:bool}, comment: string, bonus: number,
+ *               settings: {academie, etablissement} }
  */
 async function exportEvaluation(candidate, sheetKey, data) {
   const cfg = SHEET_CONFIG[sheetKey];
@@ -166,7 +193,7 @@ async function exportEvaluation(candidate, sheetKey, data) {
   const zip = await loadCandidateZip(candidate);
   const sheetPath = await resolveSheetPath(zip, cfg.name);
   let xml = await zip.file(sheetPath).async("string");
-  xml = fillSheetXml(xml, sheetKey, candidate, data.evaluation, data.comment, data.settings);
+  xml = fillSheetXml(xml, sheetKey, candidate, data, data.settings);
   zip.file(sheetPath, xml);
   const buf = await finalizeZip(zip);
   return saveExport(buf, candidate, sheetKey);
@@ -174,19 +201,47 @@ async function exportEvaluation(candidate, sheetKey, data) {
 
 /**
  * Export complet : remplit les 5 onglets avec les données disponibles.
- * @param dataBySheet { [sheetKey]: { evaluation, comment } }, settings à part
+ * @param dataBySheet { [sheetKey]: { evaluation, comment, bonus } }
+ * @returns { filePath, fileName }
  */
 async function exportFull(candidate, dataBySheet, settings) {
-  const zip = await loadCandidateZip(candidate);
-  for (const sheetKey of SHEET_ORDER) {
-    const data = dataBySheet[sheetKey] || { evaluation: {}, comment: "" };
-    const sheetPath = await resolveSheetPath(zip, SHEET_CONFIG[sheetKey].name);
-    let xml = await zip.file(sheetPath).async("string");
-    xml = fillSheetXml(xml, sheetKey, candidate, data.evaluation, data.comment, settings);
-    zip.file(sheetPath, xml);
-  }
-  const buf = await finalizeZip(zip);
+  const buf = await buildFullBuffer(candidate, dataBySheet, settings);
   return saveExport(buf, candidate, "COMPLET");
 }
 
-module.exports = { exportEvaluation, exportFull };
+/* Construit le classeur complet en mémoire (sans l'enregistrer) */
+async function buildFullBuffer(candidate, dataBySheet, settings) {
+  const zip = await loadCandidateZip(candidate);
+  for (const sheetKey of SHEET_ORDER) {
+    const data = dataBySheet[sheetKey] || { evaluation: {}, comment: "", bonus: 0 };
+    const sheetPath = await resolveSheetPath(zip, SHEET_CONFIG[sheetKey].name);
+    let xml = await zip.file(sheetPath).async("string");
+    xml = fillSheetXml(xml, sheetKey, candidate, data, settings);
+    zip.file(sheetPath, xml);
+  }
+  return finalizeZip(zip);
+}
+
+/**
+ * Export groupé : un zip contenant l'export complet de chaque candidat.
+ * @param entries [{ candidate, dataBySheet }]
+ * @returns { filePath, fileName, count }
+ */
+async function exportAll(entries, settings) {
+  const bundle = new JSZip();
+  const safe = (s) => String(s || "").replace(/[^a-z0-9_-]/gi, "_");
+  for (const { candidate, dataBySheet } of entries) {
+    const buf = await buildFullBuffer(candidate, dataBySheet, settings);
+    bundle.file(`E6_${safe(candidate.nom)}_${safe(candidate.prenom)}.xlsx`, buf);
+  }
+  const zipBuf = await bundle.generateAsync({
+    type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 },
+  });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const fileName = `E6_Exports_${stamp}.zip`;
+  const filePath = path.join(EXPORT_DIR, fileName);
+  fs.writeFileSync(filePath, zipBuf);
+  return { filePath, fileName, count: entries.length };
+}
+
+module.exports = { exportEvaluation, exportFull, exportAll };
