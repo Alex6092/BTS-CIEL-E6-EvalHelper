@@ -98,6 +98,40 @@ function getSettings() {
   };
 }
 
+/* ── Visibilité & édition d'un onglet pour un candidat ──
+   Règle soutenance : tant que la commission n'a pas verrouillé l'onglet SO,
+   l'établissement (enseignant/admin) ne peut NI le voir NI l'exporter. */
+function canViewSheet(user, candidateId, sheet) {
+  if (!auth.canAccessSheet(user, sheet)) return false;
+  if (!auth.canAccessCandidate(user, candidateId)) return false;
+  if (sheet === "SO" && user.role !== "commission") {
+    return store.isLocked(candidateId, "SO"); // visible seulement une fois verrouillée
+  }
+  return true;
+}
+
+/* Peut-on encore ÉDITER (saisie/commentaire/bonus) cet onglet ?
+   Non si verrouillé (personne, pas même l'admin). */
+function canEditSheetNow(user, candidateId, sheet) {
+  if (!auth.canEditSheet(user, sheet)) return false;
+  if (!auth.canAccessCandidate(user, candidateId)) return false;
+  if (store.isLocked(candidateId, sheet)) return false;
+  return true;
+}
+
+/* Qui a le DROIT de verrouiller un onglet (avant verrouillage) :
+   les mêmes que ceux qui peuvent l'éditer (SO -> commission, autres -> établissement). */
+function canLockSheet(user, candidateId, sheet) {
+  return auth.canEditSheet(user, sheet) && auth.canAccessCandidate(user, candidateId);
+}
+
+// Date (jj/mm/aaaa) à reporter dans l'Excel : date de verrouillage si verrouillé
+function lockDateFr(candidateId, sheet) {
+  const lk = store.getLock(candidateId, sheet);
+  if (!lk) return null;
+  return new Date(lk.lockedAt).toLocaleDateString("fr-FR");
+}
+
 /* ════════════════ Authentification ════════════════ */
 
 app.post("/api/login", (req, res) => {
@@ -151,17 +185,33 @@ function accessibleCandidates(user) {
 }
 
 app.get("/api/candidates", auth.requireAuth, (req, res) => {
-  const showNotes = req.user.role !== "commission"; // notes réservées à l'établissement
+  const isCommission = req.user.role === "commission";
   res.json(accessibleCandidates(req.user).map(c => {
     const pub = publicCandidate(c);
-    if (showNotes) {
-      const dataBySheet = fullDataFor(c.id);
-      pub.notes = {};
-      for (const key of SHEET_ORDER) {
-        pub.notes[key] = computeNote(key, dataBySheet[key].evaluation, dataBySheet[key].bonus).noteProposee;
-      }
-      pub.notes.finale = computeFinalNote(dataBySheet).noteProposee;
+    const locks = store.getCandidateLocks(c.id);          // { sheet: lockedAt }
+    const soLocked = !!locks.SO;
+
+    if (isCommission) {
+      // La commission ne voit pas les notes, mais le cadenas du candidat (SO verrouillée)
+      pub.soLocked = soLocked;
+      return pub;
     }
+
+    // Établissement : notes + état de verrouillage par onglet
+    const dataBySheet = fullDataFor(c.id);
+    pub.notes = {};
+    pub.locks = {};
+    for (const key of SHEET_ORDER) {
+      pub.locks[key] = !!locks[key];
+      // La soutenance n'est visible qu'une fois verrouillée par la commission
+      const visible = key !== "SO" || soLocked;
+      pub.notes[key] = visible
+        ? computeNote(key, dataBySheet[key].evaluation, dataBySheet[key].bonus).noteProposee
+        : null;
+    }
+    // Note finale : seulement si la soutenance est communiquée (verrouillée)
+    pub.notes.finale = soLocked ? computeFinalNote(dataBySheet).noteProposee : null;
+    pub.finaleLocked = soLocked;
     return pub;
   }));
 });
@@ -237,12 +287,21 @@ app.get("/api/evaluation", auth.requireAuth, (req, res) => {
   if (!SHEET_CONFIG[sheet]) return res.status(400).json({ error: "Onglet invalide." });
   if (!auth.canAccessSheet(req.user, sheet)) return res.status(403).json({ error: "Accès refusé à cet onglet." });
   if (!auth.canAccessCandidate(req.user, candidateId)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
+  const lock = store.getLock(candidateId, sheet);
+  // Soutenance non communiquée à l'établissement : pas de données renvoyées
+  if (!canViewSheet(req.user, candidateId, sheet)) {
+    return res.json({ hidden: true, locked: !!lock });
+  }
   const extra = store.getExtra(candidateId, sheet);
   res.json({
     state: store.getEvaluation(candidateId, sheet),
     comment: extra.text,
     bonus: extra.bonus,
-    canEdit: auth.canEditSheet(req.user, sheet),
+    locked: !!lock,
+    lockedAt: lock ? lock.lockedAt : null,
+    lockedByName: lock ? (lock.lockedByName || lock.lockedByUser || "—") : null,
+    canEdit: canEditSheetNow(req.user, candidateId, sheet),
+    canLock: !lock && canLockSheet(req.user, candidateId, sheet),
   });
 });
 
@@ -256,6 +315,10 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
     if (!SHEET_CONFIG[sheet]) return res.status(400).json({ error: "Onglet invalide." });
     if (!auth.canAccessSheet(req.user, sheet)) return res.status(403).json({ error: "Accès refusé à cet onglet." });
     if (!auth.canAccessCandidate(req.user, candidateId)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
+    // Soutenance non communiquée : l'établissement ne peut pas l'exporter
+    if (!canViewSheet(req.user, candidateId, sheet)) {
+      return res.status(403).json({ error: "L'onglet Soutenance n'est pas encore communiqué (verrouillé par la commission)." });
+    }
     const candidate = store.getCandidate(candidateId);
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
     const extra = store.getExtra(candidate.id, sheet);
@@ -263,6 +326,7 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
       evaluation: store.getEvaluation(candidate.id, sheet),
       comment: extra.text,
       bonus: extra.bonus,
+      dateOverride: lockDateFr(candidate.id, sheet),
       settings: getSettings(),
     });
     registerDownload(fileName, req.user.id);
@@ -272,6 +336,7 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
   }
 });
 
+// Données complètes d'un candidat (toutes feuilles), avec date de verrouillage
 function fullDataFor(candidateId) {
   const dataBySheet = {};
   for (const key of SHEET_ORDER) {
@@ -280,9 +345,20 @@ function fullDataFor(candidateId) {
       evaluation: store.getEvaluation(candidateId, key),
       comment: extra.text,
       bonus: extra.bonus,
+      dateOverride: lockDateFr(candidateId, key),
     };
   }
   return dataBySheet;
+}
+
+// Idem mais masque les onglets non visibles par l'utilisateur (soutenance
+// non verrouillée -> null -> laissé vierge dans l'export)
+function exportDataFor(candidateId, user) {
+  const d = fullDataFor(candidateId);
+  for (const key of SHEET_ORDER) {
+    if (!canViewSheet(user, candidateId, key)) d[key] = null;
+  }
+  return d;
 }
 
 app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, res) => {
@@ -291,7 +367,7 @@ app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, r
     const candidate = candidateId ? store.getCandidate(candidateId) : null;
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
     if (!auth.canAccessCandidate(req.user, candidate.id)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
-    const { fileName } = await exportFull(candidate, fullDataFor(candidate.id), getSettings());
+    const { fileName } = await exportFull(candidate, exportDataFor(candidate.id, req.user), getSettings());
     registerDownload(fileName, req.user.id);
     res.json({ downloadUrl: "/download/" + encodeURIComponent(fileName), fileName });
   } catch (e) {
@@ -308,7 +384,7 @@ app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (req, re
     if (!withExcel.length) {
       return res.status(400).json({ error: "Aucun candidat (accessible) n'a de fichier Excel associé." });
     }
-    const entries = withExcel.map(candidate => ({ candidate, dataBySheet: fullDataFor(candidate.id) }));
+    const entries = withExcel.map(candidate => ({ candidate, dataBySheet: exportDataFor(candidate.id, req.user) }));
     const { fileName, count } = await exportAll(entries, getSettings());
     registerDownload(fileName, req.user.id);
     res.json({
@@ -327,6 +403,50 @@ app.get("/download/:file", auth.requireAuth, (req, res) => {
   const full = path.join(EXPORT_DIR, file);
   if (!fs.existsSync(full)) return res.status(404).send("Fichier introuvable.");
   res.download(full);
+});
+
+/* ════════════════ Verrouillage ════════════════ */
+
+// Verrouille un onglet pour un candidat (action irréversible).
+app.post("/api/lock", auth.requireAuth, (req, res) => {
+  const candidateId = intId((req.body || {}).candidateId);
+  const sheet = String((req.body || {}).sheet || "");
+  if (!candidateId) return res.status(400).json({ error: "Candidat invalide." });
+  if (!SHEET_CONFIG[sheet]) return res.status(400).json({ error: "Onglet invalide." });
+  if (!store.getCandidate(candidateId)) return res.status(404).json({ error: "Candidat introuvable." });
+  if (!canLockSheet(req.user, candidateId, sheet)) {
+    return res.status(403).json({ error: "Vous n'avez pas le droit de verrouiller cet onglet." });
+  }
+  if (store.isLocked(candidateId, sheet)) {
+    return res.status(400).json({ error: "Cet onglet est déjà verrouillé." });
+  }
+  const lockedAt = new Date().toISOString();
+  store.lock(candidateId, sheet, lockedAt, req.user.id);
+  broadcastAll({ type: "lockchanged", candidateId, sheet });
+  res.json({ ok: true, lockedAt });
+});
+
+// Verrouille le LOT : toutes les soutenances des candidats attribués au membre
+// de commission. Double confirmation côté client + mot de passe ici.
+app.post("/api/lock-batch", auth.requireRole("commission"), (req, res) => {
+  const password = (req.body || {}).password;
+  if (typeof password !== "string" || password.length < 1 || password.length > 500) {
+    return res.status(400).json({ error: "Mot de passe requis." });
+  }
+  const fullUser = store.getUser(req.user.id);
+  if (!fullUser || !auth.verifyPassword(password, fullUser.passwordHash)) {
+    return res.status(401).json({ error: "Mot de passe incorrect." });
+  }
+  const candidates = store.listCandidatesForCommission(req.user.id);
+  const lockedAt = new Date().toISOString();
+  let locked = 0;
+  for (const c of candidates) {
+    if (store.lock(c.id, "SO", lockedAt, req.user.id)) {
+      locked++;
+      broadcastAll({ type: "lockchanged", candidateId: c.id, sheet: "SO" });
+    }
+  }
+  res.json({ ok: true, locked, total: candidates.length });
 });
 
 /* ════════════════ Administration ════════════════ */
@@ -578,22 +698,35 @@ function handleWsMessage(ws, raw) {
       if (!SHEET_CONFIG[sheet]) return;
       if (!auth.canAccessSheet(ws.user, sheet)) return;
       if (!auth.canAccessCandidate(ws.user, candidateId)) return;
-      ws.room = roomKey(candidateId, sheet);
       ws.candidateId = candidateId;
       ws.sheet = sheet;
+      const lock = store.getLock(candidateId, sheet);
+      // Soutenance non communiquée à l'établissement : on ne rejoint PAS la
+      // salle (sinon il recevrait les modifications en direct de la commission)
+      if (!canViewSheet(ws.user, candidateId, sheet)) {
+        ws.room = null;
+        ws.send(JSON.stringify({ type: "state", hidden: true, locked: !!lock }));
+        return;
+      }
+      ws.room = roomKey(candidateId, sheet);
       const extra = store.getExtra(candidateId, sheet);
       ws.send(JSON.stringify({
         type: "state",
         state: store.getEvaluation(candidateId, sheet),
         comment: extra.text,
         bonus: extra.bonus,
-        canEdit: auth.canEditSheet(ws.user, sheet),
+        locked: !!lock,
+        lockedAt: lock ? lock.lockedAt : null,
+        lockedByName: lock ? (lock.lockedByName || lock.lockedByUser || "—") : null,
+        canEdit: canEditSheetNow(ws.user, candidateId, sheet),
+        canLock: !lock && canLockSheet(ws.user, candidateId, sheet),
       }));
     }
 
     else if (msg.type === "set") {
       if (!ws.room) return;
-      if (!auth.canEditSheet(ws.user, ws.sheet)) return; // SO : commissions uniquement
+      // role + accès + NON verrouillé (revérifié à chaque message)
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
       const { candidateId, sheet } = ws;
       if (typeof msg.itemId !== "string" || !VALID_IDS[sheet].has(msg.itemId)) return;
       const checked = !!msg.checked;
@@ -603,7 +736,7 @@ function handleWsMessage(ws, raw) {
 
     else if (msg.type === "comment") {
       if (!ws.room) return;
-      if (!auth.canEditSheet(ws.user, ws.sheet)) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
       if (typeof msg.text !== "string") return;
       const text = msg.text.slice(0, 5000);
       store.setComment(ws.candidateId, ws.sheet, text);
@@ -613,7 +746,7 @@ function handleWsMessage(ws, raw) {
 
     else if (msg.type === "bonus") {
       if (!ws.room) return;
-      if (!auth.canEditSheet(ws.user, ws.sheet)) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
       // Bonus sur 2 points, borné [0, 2] ; NaN/Infinity/objets rejetés
       const n = Number(msg.bonus);
       if (!Number.isFinite(n)) return;

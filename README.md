@@ -46,6 +46,33 @@ Deux regroupements distincts, configurés par l'**administrateur** :
 
 La création/modification des candidats et tous les rattachements sont réservés à l'administrateur.
 
+## Verrouillage des onglets
+
+Une fois une revue passée, on **verrouille** son onglet pour figer l'évaluation :
+
+- Bouton **« Verrouiller »** sur la page d'évaluation (confirmation requise ; grisé une fois verrouillé).
+- Un onglet verrouillé devient **lecture seule pour tout le monde, y compris l'administrateur** — l'API et le WebSocket refusent toute modification (vérifié côté serveur, pas seulement masqué dans l'interface).
+- La **date de verrouillage** est enregistrée et reportée dans le champ « Date » de l'onglet Excel correspondant.
+- Qui peut verrouiller : la soutenance → **membre de commission uniquement** ; les autres onglets → établissement (enseignant de la classe / admin).
+
+### Soutenance : confidentialité jusqu'au verrouillage
+
+Tant que la commission n'a **pas verrouillé** la soutenance d'un candidat, l'établissement (enseignants et admin) **ne peut pas voir** cette évaluation :
+- masquée dans l'interface (message d'attente) et **non synchronisée** par WebSocket (aucune fuite en direct) ;
+- **note de soutenance et note finale masquées** dans la liste des candidats ;
+- **exclue des exports Excel** de l'établissement (onglet laissé vierge, note finale non écrite) — pour qu'on ne puisse pas la lire en ouvrant le fichier.
+
+Dès que la commission verrouille, tout devient visible (avec un cadenas).
+
+### Cadenas dans la liste
+
+- Établissement : un 🔒 s'affiche à côté de chaque note d'onglet verrouillé ; la note de soutenance/finale apparaît verrouillée une fois communiquée.
+- Commission : un 🔒 s'affiche sur chaque candidat dont la soutenance est verrouillée.
+
+### Verrouiller le lot (commission)
+
+Bouton **« Verrouiller le lot »** : verrouille la soutenance de **tous** les candidats attribués, en une fois. Double confirmation : message d'avertissement, puis **saisie du mot de passe** du compte pour valider.
+
 ## Purge de début d'année
 
 Bouton dédié dans le panneau d'administration : il **archive** d'abord la base (copie `data/archive-<date>.db`), puis **supprime tous les candidats** et leurs évaluations/fichiers. Les comptes, classes, commissions et paramètres sont conservés. Double confirmation requise.
@@ -113,7 +140,7 @@ la note finale sont affichées dans la liste des candidats (établissement uniqu
 |---|---|
 | `server.js` | Express + WebSocket + API REST + contrôle d'accès |
 | `auth.js` | Mots de passe (scrypt), sessions cookie, rôles |
-| `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, comptes, classes, commissions, paramètres ; archive/purge. Chemin surchargeable via `DB_FILE`. |
+| `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, **verrous**, comptes, classes, commissions, paramètres ; archive/purge. Chemin surchargeable via `DB_FILE`. |
 | `excel.js` | Génération des copies Excel remplies |
 | `hierarchy.js` | Grilles des 5 onglets + mapping lignes/colonnes Excel |
 | `public/` | Frontend (login, candidats, saisie, administration) |

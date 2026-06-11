@@ -62,6 +62,16 @@ db.exec(`
     FOREIGN KEY (candidateId) REFERENCES candidates(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS locks (
+    candidateId INTEGER NOT NULL,
+    sheet       TEXT NOT NULL,
+    lockedAt    TEXT NOT NULL,        -- ISO datetime du verrouillage
+    lockedBy    INTEGER,              -- userId (NULL si compte supprimé)
+    PRIMARY KEY (candidateId, sheet),
+    FOREIGN KEY (candidateId) REFERENCES candidates(id) ON DELETE CASCADE,
+    FOREIGN KEY (lockedBy) REFERENCES users(id) ON DELETE SET NULL
+  );
+
   CREATE TABLE IF NOT EXISTS users (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     username     TEXT NOT NULL UNIQUE,
@@ -156,6 +166,16 @@ const q = {
     VALUES (@candidateId, @sheet, @itemId, @checked)
     ON CONFLICT(candidateId, sheet, itemId) DO UPDATE SET checked = @checked
   `),
+
+  // ── Verrous ──
+  getLock: db.prepare(`
+    SELECT l.lockedAt, l.lockedBy, u.displayName AS lockedByName, u.username AS lockedByUser
+    FROM locks l LEFT JOIN users u ON u.id = l.lockedBy
+    WHERE l.candidateId = ? AND l.sheet = ?
+  `),
+  isLocked: db.prepare("SELECT 1 FROM locks WHERE candidateId = ? AND sheet = ? LIMIT 1"),
+  candidateLocks: db.prepare("SELECT sheet, lockedAt FROM locks WHERE candidateId = ?"),
+  insertLock: db.prepare("INSERT OR IGNORE INTO locks (candidateId, sheet, lockedAt, lockedBy) VALUES (?, ?, ?, ?)"),
 
   // ── Commentaires + bonus ──
   getExtra: db.prepare("SELECT text, bonus FROM comments WHERE candidateId = ? AND sheet = ?"),
@@ -280,6 +300,19 @@ module.exports = {
   setEvaluation: (candidateId, sheet, itemId, checked) => {
     q.setEval.run({ candidateId, sheet, itemId, checked: checked ? 1 : 0 });
   },
+
+  // Verrous
+  isLocked: (candidateId, sheet) => !!q.isLocked.get(candidateId, sheet),
+  getLock: (candidateId, sheet) => q.getLock.get(candidateId, sheet) || null,
+  // Map { sheet: lockedAt } pour un candidat
+  getCandidateLocks: (candidateId) => {
+    const out = {};
+    for (const r of q.candidateLocks.all(candidateId)) out[r.sheet] = r.lockedAt;
+    return out;
+  },
+  // Verrouille si pas déjà verrouillé ; retourne true si le verrou a été posé
+  lock: (candidateId, sheet, lockedAt, lockedBy) =>
+    q.insertLock.run(candidateId, sheet, lockedAt, lockedBy).changes > 0,
 
   // Commentaires + bonus — retourne { text, bonus }
   getExtra: (candidateId, sheet) => {

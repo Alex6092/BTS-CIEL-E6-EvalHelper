@@ -121,7 +121,9 @@ function fillSheetXml(xml, sheetKey, candidate, data, settings) {
   xml = setCellString(xml, cfg.info.nom, candidate.nom || "");
   xml = setCellString(xml, cfg.info.prenom, candidate.prenom || "");
   xml = setCellString(xml, cfg.info.numero, candidate.numero || "");
-  xml = setCellString(xml, cfg.info.date, new Date().toLocaleDateString("fr-FR"));
+  // Date : date de verrouillage si fournie, sinon date d'export
+  const dateStr = data.dateOverride || new Date().toLocaleDateString("fr-FR");
+  xml = setCellString(xml, cfg.info.date, dateStr);
 
   // Commentaire (cellule fusionnée, texte multi-lignes accepté)
   if (comment.trim()) {
@@ -210,8 +212,10 @@ async function exportFull(candidate, dataBySheet, settings) {
   return saveExport(buf, candidate, "COMPLET");
 }
 
-/* Remplit la fiche récapitulative : session, infos candidat, note finale */
-function fillRecapXml(xml, candidate, dataBySheet, settings) {
+/* Remplit la fiche récapitulative : session, infos candidat, note finale.
+   writeFinale=false (ex. soutenance non communiquée) : on n'écrit pas la note
+   finale pour ne pas divulguer la soutenance par déduction. */
+function fillRecapXml(xml, candidate, dataBySheet, settings, writeFinale) {
   const cfg = RECAP_CONFIG;
   if (settings.session)       xml = setCellString(xml, cfg.sessionCell, "SESSION " + settings.session);
   if (settings.academie)      xml = setCellString(xml, cfg.info.academie, settings.academie);
@@ -222,25 +226,31 @@ function fillRecapXml(xml, candidate, dataBySheet, settings) {
   xml = setCellString(xml, cfg.info.date, new Date().toLocaleDateString("fr-FR"));
 
   // Note finale proposée au jury (C34) = arrondi ½ pt sup. de (Stage×1 + R3×3 + SO×3)/7
-  const { noteProposee } = computeFinalNote(dataBySheet);
-  xml = setCellNumber(xml, cfg.noteCell, noteProposee);
+  if (writeFinale) {
+    const { noteProposee } = computeFinalNote(dataBySheet);
+    xml = setCellNumber(xml, cfg.noteCell, noteProposee);
+  }
   return xml;
 }
 
-/* Construit le classeur complet en mémoire (sans l'enregistrer) */
+/* Construit le classeur complet en mémoire (sans l'enregistrer).
+   Un onglet dont dataBySheet[sheet] vaut null est laissé tel quel dans le
+   template (cas de la soutenance non communiquée à l'établissement). */
 async function buildFullBuffer(candidate, dataBySheet, settings) {
   const zip = await loadCandidateZip(candidate);
   for (const sheetKey of SHEET_ORDER) {
+    if (dataBySheet[sheetKey] === null) continue; // onglet masqué : on ne touche pas
     const data = dataBySheet[sheetKey] || { evaluation: {}, comment: "", bonus: 0 };
     const sheetPath = await resolveSheetPath(zip, SHEET_CONFIG[sheetKey].name);
     let xml = await zip.file(sheetPath).async("string");
     xml = fillSheetXml(xml, sheetKey, candidate, data, settings);
     zip.file(sheetPath, xml);
   }
-  // Fiche récapitulative
+  // Fiche récapitulative : note finale seulement si la soutenance est incluse
+  const writeFinale = dataBySheet.SO !== null && dataBySheet.SO !== undefined;
   const recapPath = await resolveSheetPath(zip, RECAP_CONFIG.name);
   let recapXml = await zip.file(recapPath).async("string");
-  recapXml = fillRecapXml(recapXml, candidate, dataBySheet, settings);
+  recapXml = fillRecapXml(recapXml, candidate, dataBySheet, settings, writeFinale);
   zip.file(recapPath, recapXml);
 
   return finalizeZip(zip);

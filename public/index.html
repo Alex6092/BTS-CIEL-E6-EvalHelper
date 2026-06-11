@@ -72,6 +72,10 @@
     </form>
   </div>
 
+  <div id="batch-lock-bar" class="hidden">
+    <button class="btn btn-danger" id="btn-lock-batch">🔒 Verrouiller le lot (toutes mes soutenances)</button>
+  </div>
+
   <div class="candidate-list" id="candidate-list"></div>
 </div>
 
@@ -87,6 +91,7 @@
       <label for="sheet-select">Onglet de saisie</label>
       <select id="sheet-select"></select>
     </div>
+    <button class="btn btn-danger btn-lock hidden" id="btn-lock">🔒 Verrouiller</button>
     <button class="btn btn-success" id="btn-export">⬇ Exporter cet onglet</button>
     <button class="btn btn-primary hidden" id="btn-export-full">⬇ Exporter tout</button>
   </div>
@@ -95,6 +100,14 @@
     🔒 Lecture seule — l'onglet Soutenance n'est modifiable que par les membres de la commission d'évaluation.
   </div>
 
+  <div id="locked-banner" class="locked-banner hidden"></div>
+
+  <div id="hidden-panel" class="hidden-panel hidden">
+    🔒 L'évaluation de la soutenance n'est pas encore communiquée.<br>
+    Elle deviendra visible une fois que la commission aura verrouillé cet onglet.
+  </div>
+
+  <div id="grading-content">
   <div id="global-progress-wrap">
     <div class="progress-bar-bg"><div class="progress-bar-fill" id="global-fill" style="width:0%"></div></div>
     <span><span id="global-percent">0</span> %</span>
@@ -135,6 +148,7 @@
   </div>
 
   <div id="app"></div>
+  </div><!-- /grading-content -->
 </div>
 
 <!-- ════════════ ÉCRAN 3 : ADMINISTRATION ════════════ -->

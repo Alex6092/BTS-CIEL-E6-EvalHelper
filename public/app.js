@@ -27,6 +27,10 @@ let current = { candidate: null, sheet: null };
 let state = {};            // { itemId: bool }
 let bonus = 0;             // points bonus de l'onglet courant
 let canEditCurrent = false;// droit d'écriture sur l'onglet courant
+let lockedCurrent = false; // onglet courant verrouillé ?
+let canLockCurrent = false;// droit de verrouiller l'onglet courant
+let hiddenCurrent = false; // onglet masqué (soutenance non communiquée)
+let lockInfo = { lockedAt: null, lockedByName: null };
 let ws = null;
 let wsReady = false;
 
@@ -149,6 +153,14 @@ function connectWS() {
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === "state") {
+      hiddenCurrent = !!msg.hidden;
+      lockedCurrent = !!msg.locked;
+      canLockCurrent = !!msg.canLock;
+      lockInfo = { lockedAt: msg.lockedAt || null, lockedByName: msg.lockedByName || null };
+      if (hiddenCurrent) {
+        applyEditability();
+        return; // pas de données : la soutenance n'est pas communiquée
+      }
       state = msg.state || {};
       bonus = Number(msg.bonus) || 0;
       canEditCurrent = !!msg.canEdit;
@@ -165,6 +177,12 @@ function connectWS() {
       bonus = Number(msg.bonus) || 0;
       if (document.activeElement !== $("#bonus-input")) $("#bonus-input").value = bonus;
       refreshNote();
+    } else if (msg.type === "lockchanged") {
+      // Un onglet vient d'être verrouillé : rafraîchir la vue concernée
+      if (current.candidate && current.candidate.id === msg.candidateId && current.sheet === msg.sheet) {
+        subscribe(); // recharge l'état (lecture seule + soutenance désormais visible)
+      }
+      if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
     } else if (msg.type === "candidates") {
       if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
     }
@@ -202,6 +220,9 @@ async function loadCandidates() {
   const list = await api("/api/candidates");
   const box = $("#candidate-list");
   box.innerHTML = "";
+  // Bouton "Verrouiller le lot" : commission, et au moins une soutenance non verrouillée
+  const showBatch = me && me.user.role === "commission" && list.some(c => !c.soLocked);
+  $("#batch-lock-bar").classList.toggle("hidden", !showBatch);
   if (!list.length) {
     const e = el("div", "empty-state");
     e.textContent = isAdmin()
@@ -217,7 +238,10 @@ function candidateCard(c) {
   const card = el("div", "candidate-card");
 
   const info = el("div", "info");
-  const name = el("div", "name"); name.textContent = `${c.nom} ${c.prenom}`;
+  const name = el("div", "name");
+  name.textContent = `${c.nom} ${c.prenom}`;
+  // Commission : cadenas si la soutenance du candidat est verrouillée
+  if (c.soLocked) { const lk = el("span"); lk.textContent = " 🔒"; lk.title = "Soutenance verrouillée"; name.append(lk); }
   const metaParts = [c.numero ? "N° " + c.numero : "—"];
   if (c.className) metaParts.push("🎓 " + c.className);
   const meta = el("div", "meta"); meta.textContent = metaParts.join(" · ");
@@ -231,15 +255,31 @@ function candidateCard(c) {
   // Notes par revue + note finale (établissement uniquement)
   if (c.notes) {
     const fr = (n) => Number(n).toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+    const locks = c.locks || {};
     const notes = el("div", "notes-row");
     for (const key of SHEET_LIST) {
       if (!(key in c.notes)) continue;
       const chip = el("span", "note-chip");
-      chip.innerHTML = `<span class="nc-label">${SHEETS[key] ? SHEETS[key].label : key}</span> ${fr(c.notes[key])}`;
+      const label = SHEETS[key] ? SHEETS[key].label : key;
+      if (c.notes[key] === null) {
+        // Onglet non communiqué (soutenance non verrouillée)
+        chip.classList.add("masked");
+        chip.innerHTML = `<span class="nc-label">${label}</span> 🔒`;
+        chip.title = "Non communiqué (en attente de verrouillage par la commission)";
+      } else {
+        chip.innerHTML = `<span class="nc-label">${label}</span> ${fr(c.notes[key])}${locks[key] ? " 🔒" : ""}`;
+        if (locks[key]) chip.title = "Onglet verrouillé";
+      }
       notes.appendChild(chip);
     }
     const fin = el("span", "note-chip finale");
-    fin.innerHTML = `<span class="nc-label">Note finale</span> ${fr(c.notes.finale)} / 20`;
+    if (c.notes.finale === null) {
+      fin.classList.add("masked");
+      fin.innerHTML = `<span class="nc-label">Note finale</span> 🔒`;
+      fin.title = "Disponible une fois la soutenance verrouillée";
+    } else {
+      fin.innerHTML = `<span class="nc-label">Note finale</span> ${fr(c.notes.finale)} / 20${c.finaleLocked ? " 🔒" : ""}`;
+    }
     notes.appendChild(fin);
     info.append(notes);
   }
@@ -366,11 +406,13 @@ function bindUI() {
   $("#btn-export").onclick = () => exportExcel(false);
   $("#btn-export-full").onclick = () => exportExcel(true);
   $("#btn-export-all").onclick = exportAllExcel;
+  $("#btn-lock").onclick = lockCurrentSheet;
+  $("#btn-lock-batch").onclick = lockBatch;
 
   // Points bonus : envoi avec debounce
   const bonusInput = $("#bonus-input");
   bonusInput.addEventListener("input", () => {
-    if (!canEditCurrent) return;
+    if (!canEditCurrent || lockedCurrent) return;
     let v = Math.max(0, Math.min(2, Number(bonusInput.value) || 0));
     bonus = v;
     refreshNote();
@@ -385,6 +427,7 @@ function bindUI() {
   // Commentaire : envoi avec debounce
   const commentInput = $("#comment-input");
   commentInput.addEventListener("input", () => {
+    if (!canEditCurrent || lockedCurrent) return;
     $("#comment-status").textContent = "Saisie…";
     clearTimeout(commentInput._t);
     commentInput._t = setTimeout(() => {
@@ -402,12 +445,50 @@ function bindUI() {
   $("#btn-purge").onclick = doPurge;
 }
 
-/* Active / désactive la saisie selon le droit d'écriture sur l'onglet courant */
+/* Active / désactive la saisie selon le droit d'écriture, le verrou et le masquage */
 function applyEditability() {
-  $("#readonly-banner").classList.toggle("hidden", canEditCurrent);
-  $("#app").classList.toggle("readonly", !canEditCurrent);
-  $("#comment-input").disabled = !canEditCurrent;
-  $("#bonus-input").disabled = !canEditCurrent;
+  // Onglet masqué (soutenance non communiquée à l'établissement)
+  $("#hidden-panel").classList.toggle("hidden", !hiddenCurrent);
+  $("#grading-content").classList.toggle("hidden", hiddenCurrent);
+  $("#btn-export").classList.toggle("hidden", hiddenCurrent);
+  if (hiddenCurrent) {
+    $("#readonly-banner").classList.add("hidden");
+    $("#locked-banner").classList.add("hidden");
+    $("#btn-lock").classList.add("hidden");
+    return;
+  }
+
+  const editable = canEditCurrent && !lockedCurrent;
+  // Bannière "lecture seule" (soutenance non éditable par l'établissement) — pas si verrouillé
+  $("#readonly-banner").classList.toggle("hidden", editable || lockedCurrent);
+
+  // Bannière "verrouillé"
+  const lb = $("#locked-banner");
+  if (lockedCurrent) {
+    const d = lockInfo.lockedAt ? new Date(lockInfo.lockedAt).toLocaleString("fr-FR") : "";
+    lb.textContent = `🔒 Onglet verrouillé${d ? " le " + d : ""}${lockInfo.lockedByName ? " par " + lockInfo.lockedByName : ""} — modification impossible.`;
+    lb.classList.remove("hidden");
+  } else {
+    lb.classList.add("hidden");
+  }
+
+  $("#app").classList.toggle("readonly", !editable);
+  $("#comment-input").disabled = !editable;
+  $("#bonus-input").disabled = !editable;
+
+  // Bouton Verrouiller : visible si on peut verrouiller ou si déjà verrouillé (grisé)
+  const lockBtn = $("#btn-lock");
+  if (lockedCurrent) {
+    lockBtn.classList.remove("hidden");
+    lockBtn.disabled = true;
+    lockBtn.textContent = "🔒 Verrouillé";
+  } else if (canLockCurrent) {
+    lockBtn.classList.remove("hidden");
+    lockBtn.disabled = false;
+    lockBtn.textContent = "🔒 Verrouiller";
+  } else {
+    lockBtn.classList.add("hidden");
+  }
 }
 
 /* Met à jour l'affichage de la note calculée / proposée */
@@ -439,6 +520,10 @@ function openGrading(c) {
   $("#g-name").textContent = `${c.nom} ${c.prenom}`;
   $("#g-meta").textContent = (c.numero ? "N° " + c.numero + " · " : "") +
     (canEdit() ? (c.hasExcel ? "Excel : " + (c.excelName || "associé") : "⚠ aucun Excel associé") : "");
+
+  // Réinitialiser l'état de verrou/masquage en attendant la réponse du serveur
+  hiddenCurrent = false; lockedCurrent = false; canLockCurrent = false;
+  lockInfo = { lockedAt: null, lockedByName: null };
 
   show("screen-grading");
   buildGrid();
@@ -645,6 +730,36 @@ function parentOf(childId) {
 
 function expandAll() { document.querySelectorAll(".section-card").forEach(c => c.classList.remove("collapsed")); }
 function collapseAll() { document.querySelectorAll(".section-card").forEach(c => c.classList.add("collapsed")); }
+
+/* ════════════════ Verrouillage ════════════════ */
+async function lockCurrentSheet() {
+  if (!current.candidate || lockedCurrent || !canLockCurrent) return;
+  const label = SHEETS[current.sheet] ? SHEETS[current.sheet].label : current.sheet;
+  if (!confirm(`Verrouiller l'onglet « ${label} » pour ${current.candidate.nom} ${current.candidate.prenom} ?\n\nLa grille sera figée : plus aucune modification ne sera possible (par personne).`)) return;
+  try {
+    await api("/api/lock", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidateId: current.candidate.id, sheet: current.sheet }),
+    });
+    toast("Onglet verrouillé ✓", "success");
+    subscribe(); // recharge en lecture seule
+  } catch (e) { toast(e.message, "error"); }
+}
+
+/* Verrouillage du lot (commission) : double confirmation + mot de passe */
+async function lockBatch() {
+  if (!confirm("Êtes-vous vraiment sûr ?\n\nVous allez verrouiller TOUTES vos soutenances. Vous ne pourrez plus les éditer ensuite.")) return;
+  const password = prompt("Confirmez avec le mot de passe de votre compte :");
+  if (!password) return;
+  try {
+    const res = await api("/api/lock-batch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    toast(`${res.locked} soutenance(s) verrouillée(s) sur ${res.total} ✓`, "success");
+    loadCandidates();
+  } catch (e) { toast(e.message, "error"); }
+}
 
 /* ════════════════ Exports ════════════════ */
 async function exportExcel(full) {
