@@ -61,11 +61,38 @@ Les **observables** (sous-critères) de chaque grille ont été extraits des com
 
 ## Export Excel
 
-- **Exporter cet onglet** : remplit l'onglet courant (croix, commentaire, bonus, note proposée, nom/prénom/numéro/date, académie/établissement)
-- **Exporter tout** (enseignant/admin) : remplit les 5 onglets d'un coup — l'Excel calcule la note finale
+- **Exporter cet onglet** : remplit l'onglet courant (croix, commentaire, bonus, note proposée, nom/prénom/numéro/date, académie/établissement, session)
+- **Exporter tout** (enseignant/admin) : remplit les 5 onglets + la **fiche récapitulative** (infos candidat, session, et **note finale** en C34)
 - **Exporter tous les Excel** (écran candidats, enseignant/admin) : un zip contenant l'export complet de chaque candidat ayant un fichier Excel associé
 - L'export est une **copie** : le fichier associé au candidat n'est jamais modifié
 - Édition chirurgicale du zip (JSZip) : dessins, plages nommées, formules et fusions restent intacts ; les formules se recalculent à l'ouverture
+
+## Note finale
+
+`note finale = (Stage×1 + Revue 3×3 + Soutenance×3) / 7` à partir des notes proposées (C64)
+de chaque onglet, arrondie au **demi-point supérieur** et reportée en C34 de la fiche
+récapitulative (la formule F34 du classeur fait le même calcul). Les notes par revue et
+la note finale sont affichées dans la liste des candidats (établissement uniquement).
+
+## Divers
+
+- À la création d'un candidat, le fichier `E6 - Template.xlsx` lui est associé par défaut (modifiable ensuite).
+- L'**année de session** (panneau admin) est reportée dans tous les onglets (`SESSION 20xx`).
+
+## Sécurité
+
+- Mots de passe : **scrypt** avec sel aléatoire de 16 octets par compte (fonction à dérivation
+  coûteuse en mémoire, conçue pour le stockage de mots de passe — plus robuste que SHA-512+sel
+  face aux attaques par GPU), comparaison à temps constant.
+- Sessions : jeton aléatoire 256 bits en cookie **HttpOnly** (SameSite=Lax), expiration 7 jours.
+- **Toutes** les routes API et le WebSocket exigent une session valide ; chaque action est
+  contrôlée selon le rôle **côté serveur** (un client trafiqué ne peut ni écrire la soutenance
+  en tant qu'admin/enseignant, ni accéder aux candidats/onglets hors périmètre commission).
+- SQL : exclusivement des **requêtes préparées** avec paramètres liés (pas d'injection possible).
+- Entrées validées partout (types, bornes, tailles) ; JSON malformé, ids invalides, payloads
+  WS corrompus → réponse 4xx propre sans stack trace, le serveur ne tombe pas.
+- Téléchargements : seul l'utilisateur qui a généré un export peut le télécharger ;
+  traversée de chemin neutralisée ; upload limité à 25 Mo, `.xlsx` uniquement.
 
 ## Architecture
 

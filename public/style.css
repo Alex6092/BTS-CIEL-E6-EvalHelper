@@ -181,6 +181,18 @@ button.btn:hover { opacity: .88; }
 
 .empty-state { text-align: center; color: var(--muted); padding: 2rem; font-size: .9rem; }
 
+/* Notes dans la liste des candidats */
+.notes-row { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .45rem; }
+.note-chip {
+  display: inline-flex; align-items: center; gap: .35rem;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 99px; padding: .14rem .6rem;
+  font-size: .76rem; font-weight: 700; color: var(--text);
+}
+.note-chip .nc-label { font-weight: 600; color: var(--muted); font-size: .7rem; }
+.note-chip.finale { background: var(--primary-light); border-color: var(--primary); color: var(--primary); }
+.note-chip.finale .nc-label { color: var(--primary); }
+
 /* Add-candidate form */
 #add-form { padding: 1.1rem 1.2rem; display: none; gap: .6rem; flex-wrap: wrap; align-items: flex-end; }
 #add-form.open { display: flex; }

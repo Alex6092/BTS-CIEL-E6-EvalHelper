@@ -15,19 +15,41 @@ const { exportEvaluation, exportFull, exportAll } = require("./excel");
 const {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
   COMP_WEIGHTS, critWeights, allLeafIds,
+  computeNote, computeFinalNote,
 } = require("./hierarchy");
 
 const PORT = process.env.PORT || 3000;
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const EXPORT_DIR = path.join(__dirname, "exports");
+const TEMPLATE_PATH = path.join(__dirname, "E6 - Template.xlsx");
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // IDs valides par onglet (pour la validation WS)
 const VALID_IDS = {};
 for (const key of SHEET_ORDER) VALID_IDS[key] = allLeafIds(key);
 
+/* ── Validation des entrées (toutes les données externes passent ici) ──
+   Aucune valeur non validée ne doit atteindre la base ou le système de
+   fichiers. Les requêtes SQL utilisent exclusivement des requêtes
+   préparées avec paramètres liés (better-sqlite3) : pas d'injection SQL
+   possible, mais on borne aussi types et tailles pour éviter les abus. */
+function intId(v) {
+  const n = Number(v);
+  return (Number.isInteger(n) && n > 0 && n <= Number.MAX_SAFE_INTEGER) ? n : null;
+}
+function strField(v, max = 200) {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return (s.length >= 1 && s.length <= max) ? s : null;
+}
+function optStrField(v, max = 200) {
+  if (v === undefined || v === null || v === "") return "";
+  return typeof v === "string" ? v.trim().slice(0, max) : null;
+}
+
 const app = express();
-app.use(express.json());
+app.disable("x-powered-by");
+app.use(express.json({ limit: "200kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const upload = multer({
@@ -38,11 +60,24 @@ const upload = multer({
       cb(null, `candidate_${req.params.id}_${Date.now()}${ext}`);
     },
   }),
+  limits: { fileSize: 25 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => {
     const ok = /\.xlsx$/i.test(file.originalname);
     cb(ok ? null : new Error("Seuls les fichiers .xlsx sont acceptés."), ok);
   },
 });
+
+/* Propriété des exports : seul l'utilisateur qui a généré un fichier
+   peut le télécharger (empêche la récupération d'exports d'autrui en
+   devinant un nom de fichier). */
+const downloadOwners = new Map(); // fileName -> userId
+function registerDownload(fileName, userId) {
+  downloadOwners.set(fileName, userId);
+  if (downloadOwners.size > 500) {
+    const first = downloadOwners.keys().next().value;
+    downloadOwners.delete(first);
+  }
+}
 
 function publicCandidate(c) {
   return {
@@ -57,14 +92,19 @@ function getSettings() {
   return {
     academie: store.getSetting("academie"),
     etablissement: store.getSetting("etablissement"),
+    session: store.getSetting("session"),
   };
 }
 
 /* ════════════════ Authentification ════════════════ */
 
 app.post("/api/login", (req, res) => {
-  const { username, password } = req.body || {};
-  const user = store.getUserByName(String(username || "").trim());
+  const username = strField((req.body || {}).username, 100);
+  const password = (req.body || {}).password;
+  if (!username || typeof password !== "string" || password.length > 500) {
+    return res.status(401).json({ error: "Identifiants invalides." });
+  }
+  const user = store.getUserByName(username);
   if (!user || !auth.verifyPassword(password, user.passwordHash)) {
     return res.status(401).json({ error: "Identifiants invalides." });
   }
@@ -103,46 +143,82 @@ app.get("/api/hierarchy", auth.requireAuth, (req, res) => {
 /* ════════════════ Candidats ════════════════ */
 
 app.get("/api/candidates", auth.requireAuth, (req, res) => {
-  const list = (req.user.role === "commission")
+  const isCommission = req.user.role === "commission";
+  const list = isCommission
     ? store.listCandidatesForUser(req.user.id)
     : store.listCandidates();
-  res.json(list.map(publicCandidate));
+  res.json(list.map(c => {
+    const pub = publicCandidate(c);
+    // Notes par revue + note finale : réservées à l'établissement
+    if (!isCommission) {
+      const dataBySheet = fullDataFor(c.id);
+      pub.notes = {};
+      for (const key of SHEET_ORDER) {
+        pub.notes[key] = computeNote(key, dataBySheet[key].evaluation, dataBySheet[key].bonus).noteProposee;
+      }
+      pub.notes.finale = computeFinalNote(dataBySheet).noteProposee;
+    }
+    return pub;
+  }));
 });
 
 app.post("/api/candidates", auth.requireRole("admin", "teacher"), (req, res) => {
-  const { nom, prenom, numero } = req.body || {};
-  if (!nom || !prenom) return res.status(400).json({ error: "Nom et prénom requis." });
+  const nom = strField((req.body || {}).nom, 100);
+  const prenom = strField((req.body || {}).prenom, 100);
+  const numero = optStrField((req.body || {}).numero, 50);
+  if (!nom || !prenom || numero === null) return res.status(400).json({ error: "Nom et prénom requis." });
   const c = store.addCandidate(nom, prenom, numero);
+
+  // Associer le template Excel par défaut
+  if (fs.existsSync(TEMPLATE_PATH)) {
+    try {
+      const dest = path.join(UPLOAD_DIR, `candidate_${c.id}_${Date.now()}.xlsx`);
+      fs.copyFileSync(TEMPLATE_PATH, dest);
+      store.setExcel(c.id, dest, "E6 - Template.xlsx");
+    } catch {}
+  }
+
   broadcastAll({ type: "candidates" });
-  res.json(publicCandidate(c));
+  res.json(publicCandidate(store.getCandidate(c.id)));
 });
 
 app.put("/api/candidates/:id", auth.requireRole("admin", "teacher"), (req, res) => {
-  const id = Number(req.params.id);
-  if (!store.getCandidate(id)) return res.status(404).json({ error: "Candidat introuvable." });
-  const { nom, prenom, numero } = req.body || {};
-  if (!nom || !prenom) return res.status(400).json({ error: "Nom et prénom requis." });
+  const id = intId(req.params.id);
+  if (!id || !store.getCandidate(id)) return res.status(404).json({ error: "Candidat introuvable." });
+  const nom = strField((req.body || {}).nom, 100);
+  const prenom = strField((req.body || {}).prenom, 100);
+  const numero = optStrField((req.body || {}).numero, 50);
+  if (!nom || !prenom || numero === null) return res.status(400).json({ error: "Nom et prénom requis." });
   const c = store.updateCandidate(id, nom, prenom, numero);
   broadcastAll({ type: "candidates" });
   res.json(publicCandidate(c));
 });
 
 app.delete("/api/candidates/:id", auth.requireRole("admin", "teacher"), (req, res) => {
-  store.deleteCandidate(Number(req.params.id));
+  const id = intId(req.params.id);
+  if (!id) return res.status(400).json({ error: "Identifiant invalide." });
+  const candidate = store.getCandidate(id);
+  if (candidate && candidate.excelPath && fs.existsSync(candidate.excelPath)) {
+    try { fs.unlinkSync(candidate.excelPath); } catch {}
+  }
+  store.deleteCandidate(id);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
 });
 
 app.post("/api/candidates/:id/excel", auth.requireRole("admin", "teacher"),
   upload.single("file"), (req, res) => {
-  const id = Number(req.params.id);
-  const candidate = store.getCandidate(id);
-  if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
+  const id = intId(req.params.id);
+  const candidate = id ? store.getCandidate(id) : null;
+  if (!candidate) {
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch {} }
+    return res.status(404).json({ error: "Candidat introuvable." });
+  }
   if (!req.file) return res.status(400).json({ error: "Aucun fichier reçu." });
   if (candidate.excelPath && fs.existsSync(candidate.excelPath)) {
     try { fs.unlinkSync(candidate.excelPath); } catch {}
   }
-  const updated = store.setExcel(id, req.file.path, req.file.originalname);
+  const updated = store.setExcel(id, req.file.path, path.basename(req.file.originalname).slice(0, 150));
   broadcastAll({ type: "candidates" });
   res.json(publicCandidate(updated));
 });
@@ -150,8 +226,9 @@ app.post("/api/candidates/:id/excel", auth.requireRole("admin", "teacher"),
 /* ════════════════ Évaluations ════════════════ */
 
 app.get("/api/evaluation", auth.requireAuth, (req, res) => {
-  const candidateId = Number(req.query.candidateId);
-  const sheet = String(req.query.sheet);
+  const candidateId = intId(req.query.candidateId);
+  const sheet = String(req.query.sheet || "");
+  if (!candidateId) return res.status(400).json({ error: "Candidat invalide." });
   if (!SHEET_CONFIG[sheet]) return res.status(400).json({ error: "Onglet invalide." });
   if (!auth.canAccessSheet(req.user, sheet)) return res.status(403).json({ error: "Accès refusé à cet onglet." });
   if (!auth.canAccessCandidate(req.user, candidateId)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
@@ -168,11 +245,13 @@ app.get("/api/evaluation", auth.requireAuth, (req, res) => {
 
 app.post("/api/export", auth.requireAuth, async (req, res) => {
   try {
-    const { candidateId, sheet } = req.body || {};
+    const candidateId = intId((req.body || {}).candidateId);
+    const sheet = String((req.body || {}).sheet || "");
+    if (!candidateId) return res.status(400).json({ error: "Candidat invalide." });
     if (!SHEET_CONFIG[sheet]) return res.status(400).json({ error: "Onglet invalide." });
     if (!auth.canAccessSheet(req.user, sheet)) return res.status(403).json({ error: "Accès refusé à cet onglet." });
     if (!auth.canAccessCandidate(req.user, candidateId)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
-    const candidate = store.getCandidate(Number(candidateId));
+    const candidate = store.getCandidate(candidateId);
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
     const extra = store.getExtra(candidate.id, sheet);
     const { fileName } = await exportEvaluation(candidate, sheet, {
@@ -181,6 +260,7 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
       bonus: extra.bonus,
       settings: getSettings(),
     });
+    registerDownload(fileName, req.user.id);
     res.json({ downloadUrl: "/download/" + encodeURIComponent(fileName), fileName });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -202,9 +282,11 @@ function fullDataFor(candidateId) {
 
 app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, res) => {
   try {
-    const candidate = store.getCandidate(Number((req.body || {}).candidateId));
+    const candidateId = intId((req.body || {}).candidateId);
+    const candidate = candidateId ? store.getCandidate(candidateId) : null;
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
     const { fileName } = await exportFull(candidate, fullDataFor(candidate.id), getSettings());
+    registerDownload(fileName, req.user.id);
     res.json({ downloadUrl: "/download/" + encodeURIComponent(fileName), fileName });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -212,7 +294,7 @@ app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, r
 });
 
 // Export groupé : tous les candidats ayant un Excel associé, dans un zip
-app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (_req, res) => {
+app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (req, res) => {
   try {
     const all = store.listCandidates();
     const withExcel = all.filter(c => c.excelPath && fs.existsSync(c.excelPath));
@@ -221,6 +303,7 @@ app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (_req, r
     }
     const entries = withExcel.map(candidate => ({ candidate, dataBySheet: fullDataFor(candidate.id) }));
     const { fileName, count } = await exportAll(entries, getSettings());
+    registerDownload(fileName, req.user.id);
     res.json({
       downloadUrl: "/download/" + encodeURIComponent(fileName),
       fileName, count, skipped: all.length - withExcel.length,
@@ -231,7 +314,9 @@ app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (_req, r
 });
 
 app.get("/download/:file", auth.requireAuth, (req, res) => {
-  const file = path.basename(req.params.file);
+  const file = path.basename(req.params.file); // neutralise toute traversée de chemin
+  const owner = downloadOwners.get(file);
+  if (owner !== req.user.id) return res.status(403).send("Accès refusé.");
   const full = path.join(EXPORT_DIR, file);
   if (!fs.existsSync(full)) return res.status(404).send("Fichier introuvable.");
   res.download(full);
@@ -244,24 +329,33 @@ app.get("/api/users", auth.requireRole("admin"), (_req, res) => {
 });
 
 app.post("/api/users", auth.requireRole("admin"), (req, res) => {
-  const { username, password, displayName, role } = req.body || {};
-  if (!username || !password) return res.status(400).json({ error: "Identifiant et mot de passe requis." });
+  const username = strField((req.body || {}).username, 100);
+  const password = (req.body || {}).password;
+  const displayName = optStrField((req.body || {}).displayName, 100);
+  const role = (req.body || {}).role;
+  if (!username || typeof password !== "string" || password.length < 1 || password.length > 500 || displayName === null) {
+    return res.status(400).json({ error: "Identifiant et mot de passe requis." });
+  }
   if (!["admin", "teacher", "commission"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
-  if (store.getUserByName(username.trim())) return res.status(400).json({ error: "Cet identifiant existe déjà." });
+  if (store.getUserByName(username)) return res.status(400).json({ error: "Cet identifiant existe déjà." });
   const u = store.addUser(username, auth.hashPassword(password), displayName, role);
   res.json(publicUser(u));
 });
 
 app.post("/api/users/:id/password", auth.requireRole("admin"), (req, res) => {
-  const { password } = req.body || {};
-  if (!password) return res.status(400).json({ error: "Mot de passe requis." });
-  if (!store.getUser(Number(req.params.id))) return res.status(404).json({ error: "Utilisateur introuvable." });
-  store.updateUserPassword(Number(req.params.id), auth.hashPassword(password));
+  const id = intId(req.params.id);
+  const password = (req.body || {}).password;
+  if (typeof password !== "string" || password.length < 1 || password.length > 500) {
+    return res.status(400).json({ error: "Mot de passe requis." });
+  }
+  if (!id || !store.getUser(id)) return res.status(404).json({ error: "Utilisateur introuvable." });
+  store.updateUserPassword(id, auth.hashPassword(password));
   res.json({ ok: true });
 });
 
 app.delete("/api/users/:id", auth.requireRole("admin"), (req, res) => {
-  const id = Number(req.params.id);
+  const id = intId(req.params.id);
+  if (!id) return res.status(400).json({ error: "Identifiant invalide." });
   const target = store.getUser(id);
   if (!target) return res.status(404).json({ error: "Utilisateur introuvable." });
   if (target.role === "admin" && store.countAdmins() <= 1) {
@@ -277,42 +371,56 @@ app.get("/api/commissions", auth.requireRole("admin"), (_req, res) => {
 });
 
 app.post("/api/commissions", auth.requireRole("admin"), (req, res) => {
-  const { name } = req.body || {};
+  const name = strField((req.body || {}).name, 150);
   if (!name) return res.status(400).json({ error: "Nom requis." });
   res.json(store.addCommission(name));
 });
 
 app.put("/api/commissions/:id", auth.requireRole("admin"), (req, res) => {
-  const { name } = req.body || {};
+  const id = intId(req.params.id);
+  const name = strField((req.body || {}).name, 150);
+  if (!id) return res.status(400).json({ error: "Identifiant invalide." });
   if (!name) return res.status(400).json({ error: "Nom requis." });
-  store.renameCommission(Number(req.params.id), name);
+  store.renameCommission(id, name);
   res.json({ ok: true });
 });
 
 app.delete("/api/commissions/:id", auth.requireRole("admin"), (req, res) => {
-  store.deleteCommission(Number(req.params.id));
+  const id = intId(req.params.id);
+  if (!id) return res.status(400).json({ error: "Identifiant invalide." });
+  store.deleteCommission(id);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
 });
 
 app.post("/api/commissions/:id/members", auth.requireRole("admin"), (req, res) => {
-  store.addMember(Number(req.params.id), Number((req.body || {}).userId));
+  const id = intId(req.params.id), userId = intId((req.body || {}).userId);
+  if (!id || !userId) return res.status(400).json({ error: "Identifiant invalide." });
+  if (!store.getCommission(id) || !store.getUser(userId)) return res.status(404).json({ error: "Introuvable." });
+  store.addMember(id, userId);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
 });
 app.delete("/api/commissions/:id/members/:userId", auth.requireRole("admin"), (req, res) => {
-  store.removeMember(Number(req.params.id), Number(req.params.userId));
+  const id = intId(req.params.id), userId = intId(req.params.userId);
+  if (!id || !userId) return res.status(400).json({ error: "Identifiant invalide." });
+  store.removeMember(id, userId);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
 });
 
 app.post("/api/commissions/:id/candidates", auth.requireRole("admin"), (req, res) => {
-  store.addCommCandidate(Number(req.params.id), Number((req.body || {}).candidateId));
+  const id = intId(req.params.id), candidateId = intId((req.body || {}).candidateId);
+  if (!id || !candidateId) return res.status(400).json({ error: "Identifiant invalide." });
+  if (!store.getCommission(id) || !store.getCandidate(candidateId)) return res.status(404).json({ error: "Introuvable." });
+  store.addCommCandidate(id, candidateId);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
 });
 app.delete("/api/commissions/:id/candidates/:candidateId", auth.requireRole("admin"), (req, res) => {
-  store.removeCommCandidate(Number(req.params.id), Number(req.params.candidateId));
+  const id = intId(req.params.id), candidateId = intId(req.params.candidateId);
+  if (!id || !candidateId) return res.status(400).json({ error: "Identifiant invalide." });
+  store.removeCommCandidate(id, candidateId);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
 });
@@ -322,10 +430,28 @@ app.get("/api/settings", auth.requireRole("admin"), (_req, res) => {
 });
 
 app.post("/api/settings", auth.requireRole("admin"), (req, res) => {
-  const { academie, etablissement } = req.body || {};
-  if (academie !== undefined) store.setSetting("academie", academie);
-  if (etablissement !== undefined) store.setSetting("etablissement", etablissement);
+  const body = req.body || {};
+  for (const key of ["academie", "etablissement", "session"]) {
+    if (body[key] !== undefined) {
+      const v = optStrField(body[key], 100);
+      if (v === null) return res.status(400).json({ error: "Valeur invalide pour " + key + "." });
+      store.setSetting(key, v);
+    }
+  }
   res.json(getSettings());
+});
+
+/* ════════════════ Gestion d'erreurs globale ════════════════
+   JSON malformé, fichier trop volumineux, mauvais type… : réponse 4xx
+   propre, jamais de stack trace exposée, le serveur ne tombe pas. */
+app.use((err, _req, res, _next) => {
+  const status = (err && (err.status || err.statusCode)) ||
+    (err && err.code === "LIMIT_FILE_SIZE" ? 413 : 400);
+  const msg = err && err.code === "LIMIT_FILE_SIZE"
+    ? "Fichier trop volumineux (25 Mo max)."
+    : (err && err.type === "entity.parse.failed" ? "Corps de requête invalide."
+      : (err && err.message) || "Requête invalide.");
+  res.status(status >= 400 && status < 600 ? status : 400).json({ error: msg });
 });
 
 /* ════════════════ WebSocket (synchro temps réel) ════════════════ */
@@ -341,12 +467,24 @@ wss.on("connection", (ws, req) => {
   ws.room = null;
 
   ws.on("message", (raw) => {
+    // Aucune donnée WS n'est digne de confiance : tout est validé, et
+    // toute erreur est contenue (un payload malveillant ne doit jamais
+    // faire tomber le serveur).
+    try { handleWsMessage(ws, raw); } catch {}
+  });
+});
+
+function handleWsMessage(ws, raw) {
+    if (typeof raw !== "string" && !Buffer.isBuffer(raw)) return;
+    if (raw.length > 20000) return;
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    if (!msg || typeof msg !== "object") return;
 
     if (msg.type === "subscribe") {
       const sheet = String(msg.sheet);
-      const candidateId = Number(msg.candidateId);
+      const candidateId = intId(msg.candidateId);
+      if (!candidateId) return;
       if (!SHEET_CONFIG[sheet]) return;
       if (!auth.canAccessSheet(ws.user, sheet)) return;
       if (!auth.canAccessCandidate(ws.user, candidateId)) return;
@@ -367,7 +505,7 @@ wss.on("connection", (ws, req) => {
       if (!ws.room) return;
       if (!auth.canEditSheet(ws.user, ws.sheet)) return; // SO : commissions uniquement
       const { candidateId, sheet } = ws;
-      if (!VALID_IDS[sheet].has(msg.itemId)) return;
+      if (typeof msg.itemId !== "string" || !VALID_IDS[sheet].has(msg.itemId)) return;
       const checked = !!msg.checked;
       store.setEvaluation(candidateId, sheet, msg.itemId, checked);
       broadcastRoom(ws.room, { type: "update", itemId: msg.itemId, checked });
@@ -376,7 +514,8 @@ wss.on("connection", (ws, req) => {
     else if (msg.type === "comment") {
       if (!ws.room) return;
       if (!auth.canEditSheet(ws.user, ws.sheet)) return;
-      const text = String(msg.text || "").slice(0, 5000);
+      if (typeof msg.text !== "string") return;
+      const text = msg.text.slice(0, 5000);
       store.setComment(ws.candidateId, ws.sheet, text);
       // Diffuser aux AUTRES clients de la salle (pas l'émetteur, qui tape)
       broadcastRoom(ws.room, { type: "comment", text }, ws);
@@ -385,13 +524,14 @@ wss.on("connection", (ws, req) => {
     else if (msg.type === "bonus") {
       if (!ws.room) return;
       if (!auth.canEditSheet(ws.user, ws.sheet)) return;
-      // Bonus sur 2 points, par pas libre, borné [0, 2]
-      const bonus = Math.max(0, Math.min(2, Number(msg.bonus) || 0));
+      // Bonus sur 2 points, borné [0, 2] ; NaN/Infinity/objets rejetés
+      const n = Number(msg.bonus);
+      if (!Number.isFinite(n)) return;
+      const bonus = Math.max(0, Math.min(2, n));
       store.setBonus(ws.candidateId, ws.sheet, bonus);
       broadcastRoom(ws.room, { type: "bonus", bonus }, ws);
     }
-  });
-});
+}
 
 function broadcastRoom(room, payload, except) {
   const data = JSON.stringify(payload);

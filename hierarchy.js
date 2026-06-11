@@ -23,28 +23,39 @@ const SHEET_CONFIG = {
   STAGE: {
     name: "E6 STAGE - IR", label: "Stage",
     info: { academie: "E8", etablissement: "E9", nom: "E10", prenom: "E11", numero: "E12", date: "E13" },
-    commentCell: "A9",
+    commentCell: "A9", sessionCell: "A6",
   },
   R1: {
     name: "E6 REVUES - IR - R1", label: "Revue 1",
     info: { academie: "E7", etablissement: "E8", nom: "E9", prenom: "E10", numero: "E11", date: "E12" },
-    commentCell: "A8",
+    commentCell: "A8", sessionCell: "A5",
   },
   R2: {
     name: "E6 REVUES - IR - R2", label: "Revue 2",
     info: { academie: "E7", etablissement: "E8", nom: "E9", prenom: "E10", numero: "E11", date: "E12" },
-    commentCell: "A8",
+    commentCell: "A8", sessionCell: "A5",
   },
   R3: {
     name: "E6 REVUES - IR - R3", label: "Revue 3",
     info: { academie: "E7", etablissement: "E8", nom: "E9", prenom: "E10", numero: "E11", date: "E12" },
-    commentCell: "A8",
+    commentCell: "A8", sessionCell: "A5",
   },
   SO: {
     name: "E6 SOUTENANCE - IR", label: "Soutenance",
     info: { academie: "E7", etablissement: "E8", nom: "E9", prenom: "E10", numero: "E11", date: "E12" },
-    commentCell: "A8",
+    commentCell: "A8", sessionCell: "A5",
   },
+};
+
+/* Fiche récapitulative : remplie lors de l'export complet.
+   F28/F30/F32 du classeur tirent les C64 de Stage/R3/SO (formules en place) ;
+   F34 = (F28×1 + F30×3 + F32×3) / 7. On reporte l'arrondi en C34. */
+const RECAP_CONFIG = {
+  name: "FICHE RECAPITULATIVE E6 -  IR", // double espace présent dans le template
+  sessionCell: "B18",
+  info: { academie: "C20", etablissement: "C21", nom: "C22", prenom: "C23", numero: "C24", date: "C25" },
+  noteCell: "C34",
+  coeffs: { STAGE: 1, R3: 3, SO: 3 },
 };
 
 const SHEET_ORDER = ["STAGE", "R1", "R2", "R3", "SO"];
@@ -561,6 +572,22 @@ function computeNote(sheetKey, evaluation, bonus) {
   return { note, noteProposee };
 }
 
+/* Note finale (comme F34 de la fiche récap) : moyenne pondérée des notes
+   proposées (C64) de Stage (×1), Revue 3 (×3) et Soutenance (×3).
+   dataBySheet = { [sheetKey]: { evaluation, bonus } } */
+function computeFinalNote(dataBySheet) {
+  let sum = 0, coeffSum = 0;
+  for (const [sheetKey, coeff] of Object.entries(RECAP_CONFIG.coeffs)) {
+    const d = (dataBySheet && dataBySheet[sheetKey]) || {};
+    const { noteProposee } = computeNote(sheetKey, d.evaluation || {}, d.bonus || 0);
+    sum += noteProposee * coeff;
+    coeffSum += coeff;
+  }
+  const note = Math.round((sum / coeffSum) * 100) / 100;
+  const noteProposee = Math.max(0, Math.ceil(note * 2 - 1e-9) / 2);
+  return { note, noteProposee };
+}
+
 /* IDs valides (feuilles) pour un onglet donné */
 function allLeafIds(sheetKey) {
   const ids = new Set();
@@ -572,7 +599,7 @@ function allLeafIds(sheetKey) {
 }
 
 module.exports = {
-  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
+  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, RECAP_CONFIG,
   COMP_WEIGHTS, critWeights, BONUS_CELL, NOTE_CELL,
-  computeLevel, computeNote, allLeafIds,
+  computeLevel, computeNote, computeFinalNote, allLeafIds,
 };

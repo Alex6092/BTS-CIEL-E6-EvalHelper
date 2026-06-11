@@ -226,6 +226,22 @@ function candidateCard(c) {
     info.append(tag);
   }
 
+  // Notes par revue + note finale (établissement uniquement)
+  if (c.notes) {
+    const fr = (n) => Number(n).toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+    const notes = el("div", "notes-row");
+    for (const key of SHEET_LIST) {
+      if (!(key in c.notes)) continue;
+      const chip = el("span", "note-chip");
+      chip.innerHTML = `<span class="nc-label">${SHEETS[key] ? SHEETS[key].label : key}</span> ${fr(c.notes[key])}`;
+      notes.appendChild(chip);
+    }
+    const fin = el("span", "note-chip finale");
+    fin.innerHTML = `<span class="nc-label">Note finale</span> ${fr(c.notes.finale)} / 20`;
+    notes.appendChild(fin);
+    info.append(notes);
+  }
+
   const actions = el("div", "actions");
 
   const bGrade = el("button", "btn btn-primary btn-sm"); bGrade.textContent = "Noter";
@@ -668,6 +684,7 @@ async function openAdmin() {
     const s = await api("/api/settings");
     $("#set-academie").value = s.academie || "";
     $("#set-etablissement").value = s.etablissement || "";
+    $("#set-session").value = s.session || "";
     await Promise.all([loadUsers(), loadCommissions()]);
   } catch (e) { toast(e.message, "error"); }
 }
@@ -680,6 +697,7 @@ async function saveSettings(e) {
       body: JSON.stringify({
         academie: $("#set-academie").value.trim(),
         etablissement: $("#set-etablissement").value.trim(),
+        session: $("#set-session").value.trim(),
       }),
     });
     toast("Paramètres enregistrés ✓", "success");

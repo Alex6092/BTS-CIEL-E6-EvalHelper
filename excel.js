@@ -14,8 +14,8 @@ const JSZip = require("jszip");
 const path = require("path");
 const fs = require("fs");
 const {
-  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
-  computeLevel, computeNote, BONUS_CELL, NOTE_CELL,
+  SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, RECAP_CONFIG,
+  computeLevel, computeNote, computeFinalNote, BONUS_CELL, NOTE_CELL,
 } = require("./hierarchy");
 
 const EXPORT_DIR = path.join(__dirname, "exports");
@@ -115,6 +115,7 @@ function fillSheetXml(xml, sheetKey, candidate, data, settings) {
   const bonus = Number(data.bonus) || 0;
 
   // En-têtes
+  if (settings.session)       xml = setCellString(xml, cfg.sessionCell, "SESSION " + settings.session);
   if (settings.academie)      xml = setCellString(xml, cfg.info.academie, settings.academie);
   if (settings.etablissement) xml = setCellString(xml, cfg.info.etablissement, settings.etablissement);
   xml = setCellString(xml, cfg.info.nom, candidate.nom || "");
@@ -209,6 +210,23 @@ async function exportFull(candidate, dataBySheet, settings) {
   return saveExport(buf, candidate, "COMPLET");
 }
 
+/* Remplit la fiche récapitulative : session, infos candidat, note finale */
+function fillRecapXml(xml, candidate, dataBySheet, settings) {
+  const cfg = RECAP_CONFIG;
+  if (settings.session)       xml = setCellString(xml, cfg.sessionCell, "SESSION " + settings.session);
+  if (settings.academie)      xml = setCellString(xml, cfg.info.academie, settings.academie);
+  if (settings.etablissement) xml = setCellString(xml, cfg.info.etablissement, settings.etablissement);
+  xml = setCellString(xml, cfg.info.nom, candidate.nom || "");
+  xml = setCellString(xml, cfg.info.prenom, candidate.prenom || "");
+  xml = setCellString(xml, cfg.info.numero, candidate.numero || "");
+  xml = setCellString(xml, cfg.info.date, new Date().toLocaleDateString("fr-FR"));
+
+  // Note finale proposée au jury (C34) = arrondi ½ pt sup. de (Stage×1 + R3×3 + SO×3)/7
+  const { noteProposee } = computeFinalNote(dataBySheet);
+  xml = setCellNumber(xml, cfg.noteCell, noteProposee);
+  return xml;
+}
+
 /* Construit le classeur complet en mémoire (sans l'enregistrer) */
 async function buildFullBuffer(candidate, dataBySheet, settings) {
   const zip = await loadCandidateZip(candidate);
@@ -219,6 +237,12 @@ async function buildFullBuffer(candidate, dataBySheet, settings) {
     xml = fillSheetXml(xml, sheetKey, candidate, data, settings);
     zip.file(sheetPath, xml);
   }
+  // Fiche récapitulative
+  const recapPath = await resolveSheetPath(zip, RECAP_CONFIG.name);
+  let recapXml = await zip.file(recapPath).async("string");
+  recapXml = fillRecapXml(recapXml, candidate, dataBySheet, settings);
+  zip.file(recapPath, recapXml);
+
   return finalizeZip(zip);
 }
 
