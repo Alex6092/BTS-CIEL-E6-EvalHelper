@@ -104,6 +104,9 @@ header p { color: var(--muted); margin-top: .35rem; font-size: .9rem; }
 /* ════════════════ Admin ════════════════ */
 .admin-card { padding: 1.1rem 1.3rem; }
 .admin-card h3 { font-size: .98rem; margin-bottom: .9rem; color: var(--text); }
+.admin-hint { font-size: .78rem; color: var(--muted); margin: -.4rem 0 .9rem; line-height: 1.45; }
+.danger-zone { border: 1px solid #fecaca; }
+.danger-zone h3 { color: #dc2626; }
 .inline-form { display: flex; gap: .6rem; flex-wrap: wrap; align-items: flex-end; margin-bottom: .9rem; }
 .inline-form select {
   padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px;

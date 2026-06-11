@@ -20,6 +20,7 @@ const {
 
 const PORT = process.env.PORT || 3000;
 const UPLOAD_DIR = path.join(__dirname, "uploads");
+const DATA_DIR = path.join(__dirname, "data");
 const EXPORT_DIR = path.join(__dirname, "exports");
 const TEMPLATE_PATH = path.join(__dirname, "E6 - Template.xlsx");
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -82,6 +83,7 @@ function registerDownload(fileName, userId) {
 function publicCandidate(c) {
   return {
     id: c.id, nom: c.nom, prenom: c.prenom, numero: c.numero,
+    classId: c.classId || null, className: c.className || null,
     hasExcel: !!c.excelPath, excelName: c.excelName || null,
   };
 }
@@ -142,15 +144,17 @@ app.get("/api/hierarchy", auth.requireAuth, (req, res) => {
 
 /* ════════════════ Candidats ════════════════ */
 
+function accessibleCandidates(user) {
+  if (user.role === "admin") return store.listCandidates();
+  if (user.role === "teacher") return store.listCandidatesForTeacher(user.id);
+  return store.listCandidatesForCommission(user.id);
+}
+
 app.get("/api/candidates", auth.requireAuth, (req, res) => {
-  const isCommission = req.user.role === "commission";
-  const list = isCommission
-    ? store.listCandidatesForUser(req.user.id)
-    : store.listCandidates();
-  res.json(list.map(c => {
+  const showNotes = req.user.role !== "commission"; // notes réservées à l'établissement
+  res.json(accessibleCandidates(req.user).map(c => {
     const pub = publicCandidate(c);
-    // Notes par revue + note finale : réservées à l'établissement
-    if (!isCommission) {
+    if (showNotes) {
       const dataBySheet = fullDataFor(c.id);
       pub.notes = {};
       for (const key of SHEET_ORDER) {
@@ -162,7 +166,8 @@ app.get("/api/candidates", auth.requireAuth, (req, res) => {
   }));
 });
 
-app.post("/api/candidates", auth.requireRole("admin", "teacher"), (req, res) => {
+// Création / modification / suppression / Excel : ADMINISTRATEUR uniquement
+app.post("/api/candidates", auth.requireRole("admin"), (req, res) => {
   const nom = strField((req.body || {}).nom, 100);
   const prenom = strField((req.body || {}).prenom, 100);
   const numero = optStrField((req.body || {}).numero, 50);
@@ -182,7 +187,7 @@ app.post("/api/candidates", auth.requireRole("admin", "teacher"), (req, res) => 
   res.json(publicCandidate(store.getCandidate(c.id)));
 });
 
-app.put("/api/candidates/:id", auth.requireRole("admin", "teacher"), (req, res) => {
+app.put("/api/candidates/:id", auth.requireRole("admin"), (req, res) => {
   const id = intId(req.params.id);
   if (!id || !store.getCandidate(id)) return res.status(404).json({ error: "Candidat introuvable." });
   const nom = strField((req.body || {}).nom, 100);
@@ -194,7 +199,7 @@ app.put("/api/candidates/:id", auth.requireRole("admin", "teacher"), (req, res) 
   res.json(publicCandidate(c));
 });
 
-app.delete("/api/candidates/:id", auth.requireRole("admin", "teacher"), (req, res) => {
+app.delete("/api/candidates/:id", auth.requireRole("admin"), (req, res) => {
   const id = intId(req.params.id);
   if (!id) return res.status(400).json({ error: "Identifiant invalide." });
   const candidate = store.getCandidate(id);
@@ -206,7 +211,7 @@ app.delete("/api/candidates/:id", auth.requireRole("admin", "teacher"), (req, re
   res.json({ ok: true });
 });
 
-app.post("/api/candidates/:id/excel", auth.requireRole("admin", "teacher"),
+app.post("/api/candidates/:id/excel", auth.requireRole("admin"),
   upload.single("file"), (req, res) => {
   const id = intId(req.params.id);
   const candidate = id ? store.getCandidate(id) : null;
@@ -285,6 +290,7 @@ app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, r
     const candidateId = intId((req.body || {}).candidateId);
     const candidate = candidateId ? store.getCandidate(candidateId) : null;
     if (!candidate) return res.status(404).json({ error: "Candidat introuvable." });
+    if (!auth.canAccessCandidate(req.user, candidate.id)) return res.status(403).json({ error: "Accès refusé à ce candidat." });
     const { fileName } = await exportFull(candidate, fullDataFor(candidate.id), getSettings());
     registerDownload(fileName, req.user.id);
     res.json({ downloadUrl: "/download/" + encodeURIComponent(fileName), fileName });
@@ -293,20 +299,21 @@ app.post("/api/export-full", auth.requireRole("admin", "teacher"), async (req, r
   }
 });
 
-// Export groupé : tous les candidats ayant un Excel associé, dans un zip
+// Export groupé : tous les candidats accessibles ayant un Excel associé, dans un zip
+// (admin -> tous ; enseignant -> ceux de ses classes)
 app.post("/api/export-all", auth.requireRole("admin", "teacher"), async (req, res) => {
   try {
-    const all = store.listCandidates();
-    const withExcel = all.filter(c => c.excelPath && fs.existsSync(c.excelPath));
+    const accessible = accessibleCandidates(req.user);
+    const withExcel = accessible.filter(c => c.excelPath && fs.existsSync(c.excelPath));
     if (!withExcel.length) {
-      return res.status(400).json({ error: "Aucun candidat n'a de fichier Excel associé." });
+      return res.status(400).json({ error: "Aucun candidat (accessible) n'a de fichier Excel associé." });
     }
     const entries = withExcel.map(candidate => ({ candidate, dataBySheet: fullDataFor(candidate.id) }));
     const { fileName, count } = await exportAll(entries, getSettings());
     registerDownload(fileName, req.user.id);
     res.json({
       downloadUrl: "/download/" + encodeURIComponent(fileName),
-      fileName, count, skipped: all.length - withExcel.length,
+      fileName, count, skipped: accessible.length - withExcel.length,
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -423,6 +430,89 @@ app.delete("/api/commissions/:id/candidates/:candidateId", auth.requireRole("adm
   store.removeCommCandidate(id, candidateId);
   broadcastAll({ type: "candidates" });
   res.json({ ok: true });
+});
+
+/* ════════════════ Classes (admin) ════════════════ */
+
+app.get("/api/classes", auth.requireRole("admin"), (_req, res) => {
+  res.json(store.listClasses());
+});
+
+app.post("/api/classes", auth.requireRole("admin"), (req, res) => {
+  const name = strField((req.body || {}).name, 150);
+  if (!name) return res.status(400).json({ error: "Nom requis." });
+  res.json(store.addClass(name));
+});
+
+app.put("/api/classes/:id", auth.requireRole("admin"), (req, res) => {
+  const id = intId(req.params.id), name = strField((req.body || {}).name, 150);
+  if (!id) return res.status(400).json({ error: "Identifiant invalide." });
+  if (!name) return res.status(400).json({ error: "Nom requis." });
+  store.renameClass(id, name);
+  res.json({ ok: true });
+});
+
+app.delete("/api/classes/:id", auth.requireRole("admin"), (req, res) => {
+  const id = intId(req.params.id);
+  if (!id) return res.status(400).json({ error: "Identifiant invalide." });
+  store.deleteClass(id);
+  broadcastAll({ type: "candidates" });
+  res.json({ ok: true });
+});
+
+app.post("/api/classes/:id/teachers", auth.requireRole("admin"), (req, res) => {
+  const id = intId(req.params.id), userId = intId((req.body || {}).userId);
+  if (!id || !userId) return res.status(400).json({ error: "Identifiant invalide." });
+  const u = store.getUser(userId);
+  if (!store.getClass(id) || !u) return res.status(404).json({ error: "Introuvable." });
+  if (u.role !== "teacher") return res.status(400).json({ error: "Seul un enseignant peut être rattaché à une classe." });
+  store.addClassTeacher(id, userId);
+  broadcastAll({ type: "candidates" });
+  res.json({ ok: true });
+});
+app.delete("/api/classes/:id/teachers/:userId", auth.requireRole("admin"), (req, res) => {
+  const id = intId(req.params.id), userId = intId(req.params.userId);
+  if (!id || !userId) return res.status(400).json({ error: "Identifiant invalide." });
+  store.removeClassTeacher(id, userId);
+  broadcastAll({ type: "candidates" });
+  res.json({ ok: true });
+});
+
+app.post("/api/classes/:id/candidates", auth.requireRole("admin"), (req, res) => {
+  const id = intId(req.params.id), candidateId = intId((req.body || {}).candidateId);
+  if (!id || !candidateId) return res.status(400).json({ error: "Identifiant invalide." });
+  if (!store.getClass(id) || !store.getCandidate(candidateId)) return res.status(404).json({ error: "Introuvable." });
+  store.setCandidateClass(candidateId, id); // un candidat = une seule classe
+  broadcastAll({ type: "candidates" });
+  res.json({ ok: true });
+});
+app.delete("/api/classes/:id/candidates/:candidateId", auth.requireRole("admin"), (req, res) => {
+  const id = intId(req.params.id), candidateId = intId(req.params.candidateId);
+  if (!id || !candidateId) return res.status(400).json({ error: "Identifiant invalide." });
+  store.clearCandidateClass(candidateId, id);
+  broadcastAll({ type: "candidates" });
+  res.json({ ok: true });
+});
+
+/* ════════════════ Purge annuelle (admin) ════════════════
+   Archive la base puis supprime tous les candidats et leurs fichiers. */
+app.post("/api/purge", auth.requireRole("admin"), (req, res) => {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const archivePath = path.join(DATA_DIR, `archive-${stamp}.db`);
+    store.archiveDatabase(archivePath);
+
+    // Supprimer les fichiers Excel des candidats avant de purger la base
+    let filesRemoved = 0;
+    for (const p of store.listExcelPaths()) {
+      try { if (p && fs.existsSync(p)) { fs.unlinkSync(p); filesRemoved++; } } catch {}
+    }
+    const removed = store.purgeCandidates();
+    broadcastAll({ type: "candidates" });
+    res.json({ ok: true, archived: path.basename(archivePath), removed, filesRemoved });
+  } catch (e) {
+    res.status(500).json({ error: "Échec de la purge : " + e.message });
+  }
 });
 
 app.get("/api/settings", auth.requireRole("admin"), (_req, res) => {

@@ -89,8 +89,9 @@ function canEditSheet(user, sheetKey) {
 }
 
 function canAccessCandidate(user, candidateId) {
-  if (user.role === "admin" || user.role === "teacher") return true;
-  return store.userCanSeeCandidate(user.id, Number(candidateId));
+  if (user.role === "admin") return true;
+  if (user.role === "teacher") return store.teacherCanSeeCandidate(user.id, Number(candidateId));
+  return store.commissionCanSeeCandidate(user.id, Number(candidateId));
 }
 
 // ── Compte admin par défaut au premier lancement ──

@@ -193,9 +193,24 @@
     <div id="user-list" class="admin-list"></div>
   </div>
 
+  <!-- Classes -->
+  <div class="card admin-card">
+    <h3>🎓 Classes (groupes pédagogiques)</h3>
+    <p class="admin-hint">Une classe regroupe des enseignants et des candidats. Un enseignant ne peut noter que les candidats de ses classes (stage et revues). Un candidat appartient à une seule classe.</p>
+    <form id="class-form" class="inline-form">
+      <div class="field">
+        <label for="class-name">Nom de la classe *</label>
+        <input id="class-name" type="text" required autocomplete="off" placeholder="ex : CIEL 2 Scolaire" />
+      </div>
+      <button class="btn btn-success" type="submit">Créer</button>
+    </form>
+    <div id="class-list" class="admin-list"></div>
+  </div>
+
   <!-- Commissions -->
   <div class="card admin-card">
     <h3>⚖ Commissions (jurys de soutenance)</h3>
+    <p class="admin-hint">Une commission est un jury externe qui évalue la soutenance d'une partie des candidats.</p>
     <form id="commission-form" class="inline-form">
       <div class="field">
         <label for="comm-name">Nom de la commission *</label>
@@ -204,6 +219,13 @@
       <button class="btn btn-success" type="submit">Créer</button>
     </form>
     <div id="commission-list" class="admin-list"></div>
+  </div>
+
+  <!-- Purge annuelle -->
+  <div class="card admin-card danger-zone">
+    <h3>🗑 Purge de début d'année</h3>
+    <p class="admin-hint">Archive la base de données (copie de sauvegarde) puis supprime <strong>tous les candidats</strong> et leurs évaluations. Les comptes, classes, commissions et paramètres sont conservés. À utiliser une fois par an, avant de saisir les nouveaux candidats.</p>
+    <button class="btn btn-danger" id="btn-purge">Archiver et supprimer tous les candidats</button>
   </div>
 </div>
 

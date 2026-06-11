@@ -107,7 +107,7 @@ async function enterApp() {
   $("#ub-name").textContent = me.user.displayName || me.user.username;
   $("#ub-role").textContent = ROLE_LABELS[me.user.role] || me.user.role;
   $("#btn-admin").classList.toggle("hidden", !isAdmin());
-  $("#btn-toggle-add").classList.toggle("hidden", !canEdit());
+  $("#btn-toggle-add").classList.toggle("hidden", !isAdmin()); // candidats gérés par l'admin
   $("#btn-export-full").classList.toggle("hidden", !canEdit());
   $("#btn-export-all").classList.toggle("hidden", !canEdit());
 
@@ -204,7 +204,7 @@ async function loadCandidates() {
   box.innerHTML = "";
   if (!list.length) {
     const e = el("div", "empty-state");
-    e.textContent = canEdit()
+    e.textContent = isAdmin()
       ? "Aucun candidat. Cliquez sur « + Ajouter un candidat »."
       : "Aucun candidat ne vous est associé pour le moment.";
     box.appendChild(e);
@@ -218,7 +218,9 @@ function candidateCard(c) {
 
   const info = el("div", "info");
   const name = el("div", "name"); name.textContent = `${c.nom} ${c.prenom}`;
-  const meta = el("div", "meta"); meta.textContent = c.numero ? "N° " + c.numero : "—";
+  const metaParts = [c.numero ? "N° " + c.numero : "—"];
+  if (c.className) metaParts.push("🎓 " + c.className);
+  const meta = el("div", "meta"); meta.textContent = metaParts.join(" · ");
   info.append(name, meta);
   if (canEdit()) {
     const tag = el("span", "excel-tag " + (c.hasExcel ? "ok" : "no"));
@@ -248,7 +250,7 @@ function candidateCard(c) {
   bGrade.onclick = () => openGrading(c);
   actions.append(bGrade);
 
-  if (canEdit()) {
+  if (isAdmin()) {
     const bEdit = el("button", "btn btn-outline btn-sm"); bEdit.textContent = "✎ Modifier";
     bEdit.onclick = () => openEditForm(c);
     actions.append(bEdit);
@@ -396,6 +398,8 @@ function bindUI() {
   $("#settings-form").onsubmit = saveSettings;
   $("#user-form").onsubmit = createUser;
   $("#commission-form").onsubmit = createCommission;
+  $("#class-form").onsubmit = createClass;
+  $("#btn-purge").onclick = doPurge;
 }
 
 /* Active / désactive la saisie selon le droit d'écriture sur l'onglet courant */
@@ -685,7 +689,7 @@ async function openAdmin() {
     $("#set-academie").value = s.academie || "";
     $("#set-etablissement").value = s.etablissement || "";
     $("#set-session").value = s.session || "";
-    await Promise.all([loadUsers(), loadCommissions()]);
+    await Promise.all([loadUsers(), loadClasses(), loadCommissions()]);
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -851,6 +855,110 @@ async function loadCommissions() {
 
     box.appendChild(row);
   }
+}
+
+/* ── Classes ── */
+async function createClass(e) {
+  e.preventDefault();
+  try {
+    await api("/api/classes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: $("#class-name").value.trim() }),
+    });
+    $("#class-name").value = "";
+    toast("Classe créée ✓", "success");
+    loadClasses();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function loadClasses() {
+  const [classes, users, candidates] = await Promise.all([
+    api("/api/classes"),
+    api("/api/users"),
+    api("/api/candidates"),
+  ]);
+  const teacherUsers = users.filter(u => u.role === "teacher");
+  const box = $("#class-list");
+  box.innerHTML = "";
+
+  if (!classes.length) {
+    const e = el("div", "empty-state"); e.textContent = "Aucune classe.";
+    box.appendChild(e);
+    return;
+  }
+
+  for (const cls of classes) {
+    const row = el("div", "admin-row");
+    row.style.flexDirection = "column";
+    row.style.alignItems = "stretch";
+
+    const head = el("div");
+    head.style.display = "flex"; head.style.alignItems = "center"; head.style.gap = ".6rem";
+    const title = el("strong", "grow"); title.textContent = cls.name;
+    const bRen = el("button", "btn btn-outline btn-sm"); bRen.textContent = "✎"; bRen.title = "Renommer";
+    bRen.onclick = async () => {
+      const n = prompt("Nouveau nom :", cls.name);
+      if (!n) return;
+      try {
+        await api(`/api/classes/${cls.id}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: n }),
+        });
+        loadClasses();
+      } catch (e) { toast(e.message, "error"); }
+    };
+    const bDel = el("button", "btn btn-danger btn-sm"); bDel.textContent = "🗑";
+    bDel.onclick = async () => {
+      if (!confirm(`Supprimer la classe « ${cls.name} » ? Les candidats ne seront pas supprimés mais détachés de la classe.`)) return;
+      try {
+        await api(`/api/classes/${cls.id}`, { method: "DELETE" });
+        loadClasses();
+      } catch (e) { toast(e.message, "error"); }
+    };
+    head.append(title, bRen, bDel);
+    row.appendChild(head);
+
+    // Enseignants
+    row.appendChild(chipList("Enseignants :", cls.teachers,
+      (m) => m.displayName || m.username,
+      async (m) => { await api(`/api/classes/${cls.id}/teachers/${m.id}`, { method: "DELETE" }); loadClasses(); },
+      teacherUsers.filter(u => !cls.teachers.some(m => m.id === u.id)),
+      (u) => u.displayName || u.username,
+      async (uId) => {
+        await api(`/api/classes/${cls.id}/teachers`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: uId }),
+        });
+        loadClasses();
+      }));
+
+    // Candidats (un candidat = une seule classe ; en rattacher un le déplace)
+    row.appendChild(chipList("Candidats :", cls.candidates,
+      (c) => `${c.nom} ${c.prenom}`,
+      async (c) => { await api(`/api/classes/${cls.id}/candidates/${c.id}`, { method: "DELETE" }); loadClasses(); },
+      candidates.filter(c => c.classId !== cls.id),
+      (c) => `${c.nom} ${c.prenom}` + (c.className ? ` (actuellement : ${c.className})` : ""),
+      async (cId) => {
+        await api(`/api/classes/${cls.id}/candidates`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ candidateId: cId }),
+        });
+        loadClasses();
+      }));
+
+    box.appendChild(row);
+  }
+}
+
+/* ── Purge annuelle ── */
+async function doPurge() {
+  if (!confirm("ARCHIVER puis SUPPRIMER tous les candidats et leurs évaluations ?\n\nUne copie de sauvegarde de la base sera créée. Les comptes, classes et commissions seront conservés.\n\nCette action est irréversible.")) return;
+  if (!confirm("Dernière confirmation : supprimer définitivement tous les candidats ?")) return;
+  try {
+    const r = await api("/api/purge", { method: "POST" });
+    toast(`Purge effectuée : ${r.removed} candidat(s) supprimé(s). Archive : ${r.archived}`, "success");
+    loadClasses(); loadCommissions();
+  } catch (e) { toast(e.message, "error"); }
 }
 
 /* Construit une ligne "label + chips + select d'ajout" */

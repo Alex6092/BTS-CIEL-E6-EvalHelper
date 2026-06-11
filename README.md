@@ -24,18 +24,31 @@ Pour changer le port : `PORT=8080 npm start`.
 
 | | Membre de commission | Enseignant établissement | Administrateur |
 |---|---|---|---|
-| Candidats visibles | Ceux de ses commissions | Tous | Tous |
+| Candidats visibles | Ceux de ses commissions | Ceux de ses **classes** | Tous |
 | Onglets accessibles | Soutenance uniquement | Les 5 | Les 5 |
 | **Saisie Soutenance** | **✓ (exclusif)** | lecture seule | lecture seule |
-| Saisie Stage / Revues | — | ✓ | ✓ |
-| Créer / modifier candidats | — | ✓ | ✓ |
-| Associer un Excel | — | ✓ | ✓ |
-| Export d'un onglet | Soutenance | ✓ | ✓ |
-| Export complet (5 onglets) | — | ✓ | ✓ |
-| **Export groupé (tous les candidats, zip)** | — | ✓ | ✓ |
-| Comptes, commissions, paramètres | — | — | ✓ |
+| Saisie Stage / Revues | — | ✓ (ses classes) | ✓ |
+| Créer / modifier / supprimer candidats | — | — | ✓ |
+| Associer un Excel | — | — | ✓ |
+| Export d'un onglet | Soutenance | ✓ (ses classes) | ✓ |
+| Export complet (5 onglets) | — | ✓ (ses classes) | ✓ |
+| **Export groupé (zip)** | — | ✓ (ses classes) | ✓ (tous) |
+| Comptes, classes, commissions, paramètres, purge | — | — | ✓ |
 
 **Pourquoi ?** La soutenance est menée par un jury externe (la commission) qui ne doit pas être influencé par les notes des autres oraux : il ne voit que la saisie soutenance. Inversement, l'onglet Soutenance n'est **modifiable que par la commission** — l'établissement le voit en lecture seule, pour éviter toute altération de l'évaluation du jury. L'établissement trace tous les oraux et génère l'Excel final complet — c'est l'Excel qui calcule la note.
+
+## Classes et commissions
+
+Deux regroupements distincts, configurés par l'**administrateur** :
+
+- **Classe** (groupe pédagogique, ex. CIEL scolaire / apprentissage) : rassemble des **enseignants** et des **candidats**. Un enseignant ne peut consulter et noter (stage + revues) que les candidats de **ses** classes. Un candidat appartient à **une seule** classe.
+- **Commission** (jury externe de soutenance) : rassemble des **membres de commission** et les **candidats** qu'ils évaluent en soutenance.
+
+La création/modification des candidats et tous les rattachements sont réservés à l'administrateur.
+
+## Purge de début d'année
+
+Bouton dédié dans le panneau d'administration : il **archive** d'abord la base (copie `data/archive-<date>.db`), puis **supprime tous les candidats** et leurs évaluations/fichiers. Les comptes, classes, commissions et paramètres sont conservés. Double confirmation requise.
 
 ## Les 5 onglets
 
@@ -100,7 +113,7 @@ la note finale sont affichées dans la liste des candidats (établissement uniqu
 |---|---|
 | `server.js` | Express + WebSocket + API REST + contrôle d'accès |
 | `auth.js` | Mots de passe (scrypt), sessions cookie, rôles |
-| `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, comptes, commissions, paramètres |
+| `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, comptes, classes, commissions, paramètres ; archive/purge. Chemin surchargeable via `DB_FILE`. |
 | `excel.js` | Génération des copies Excel remplies |
 | `hierarchy.js` | Grilles des 5 onglets + mapping lignes/colonnes Excel |
 | `public/` | Frontend (login, candidats, saisie, administration) |
