@@ -26,6 +26,7 @@ let SHEET_LIST = [];       // ordre
 let current = { candidate: null, sheet: null };
 let state = {};            // { itemId: bool }
 let bonus = 0;             // points bonus de l'onglet courant
+let noteOverride = "";     // note définitive saisie ("" = aucune)
 let canEditCurrent = false;// droit d'écriture sur l'onglet courant
 let lockedCurrent = false; // onglet courant verrouillé ?
 let canLockCurrent = false;// droit de verrouiller l'onglet courant
@@ -163,8 +164,10 @@ function connectWS() {
       }
       state = msg.state || {};
       bonus = Number(msg.bonus) || 0;
+      noteOverride = (msg.noteOverride === null || msg.noteOverride === undefined) ? "" : String(msg.noteOverride);
       canEditCurrent = !!msg.canEdit;
       $("#bonus-input").value = bonus;
+      $("#note-override-input").value = noteOverride;
       applyEditability();
       renderGridState();
       setCommentValue(msg.comment || "", true);
@@ -176,6 +179,10 @@ function connectWS() {
     } else if (msg.type === "bonus") {
       bonus = Number(msg.bonus) || 0;
       if (document.activeElement !== $("#bonus-input")) $("#bonus-input").value = bonus;
+      refreshNote();
+    } else if (msg.type === "noteOverride") {
+      noteOverride = (msg.value === null || msg.value === undefined) ? "" : String(msg.value);
+      if (document.activeElement !== $("#note-override-input")) $("#note-override-input").value = noteOverride;
       refreshNote();
     } else if (msg.type === "lockchanged") {
       // Un onglet vient d'être verrouillé : rafraîchir la vue concernée
@@ -254,8 +261,9 @@ function candidateCard(c) {
 
   // Notes par revue + note finale (établissement uniquement)
   if (c.notes) {
-    const fr = (n) => Number(n).toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+    const fr = (n) => Number(n).toLocaleString("fr-FR", { maximumFractionDigits: 2 });
     const locks = c.locks || {};
+    const overrides = c.overrides || {};
     const notes = el("div", "notes-row");
     for (const key of SHEET_LIST) {
       if (!(key in c.notes)) continue;
@@ -267,8 +275,9 @@ function candidateCard(c) {
         chip.innerHTML = `<span class="nc-label">${label}</span> 🔒`;
         chip.title = "Non communiqué (en attente de verrouillage par la commission)";
       } else {
-        chip.innerHTML = `<span class="nc-label">${label}</span> ${fr(c.notes[key])}${locks[key] ? " 🔒" : ""}`;
-        if (locks[key]) chip.title = "Onglet verrouillé";
+        const ov = overrides[key] ? " ✍" : "";
+        chip.innerHTML = `<span class="nc-label">${label}</span> ${fr(c.notes[key])}${locks[key] ? " 🔒" : ""}${ov}`;
+        chip.title = [locks[key] ? "Onglet verrouillé" : "", overrides[key] ? "Note définitive saisie" : ""].filter(Boolean).join(" · ");
       }
       notes.appendChild(chip);
     }
@@ -424,6 +433,26 @@ function bindUI() {
   });
   bonusInput.addEventListener("blur", () => { bonusInput.value = bonus; });
 
+  // Note définitive (optionnelle) : envoi avec debounce
+  const ovInput = $("#note-override-input");
+  ovInput.addEventListener("input", () => {
+    if (!canEditCurrent || lockedCurrent) return;
+    const raw = ovInput.value.trim();
+    // Validation locale : vide, ou nombre dans [0;20]
+    if (raw !== "") {
+      const n = Number(raw.replace(",", "."));
+      if (!Number.isFinite(n) || n < 0 || n > 20) { refreshNote(); return; }
+    }
+    noteOverride = raw === "" ? "" : raw.replace(",", ".");
+    refreshNote();
+    clearTimeout(ovInput._t);
+    ovInput._t = setTimeout(() => {
+      if (!wsReady) { toast("Hors ligne — note non synchronisée", "error"); return; }
+      ws.send(JSON.stringify({ type: "noteOverride", value: noteOverride === "" ? null : Number(noteOverride) }));
+    }, 500);
+  });
+  ovInput.addEventListener("blur", () => { ovInput.value = noteOverride; });
+
   // Commentaire : envoi avec debounce
   const commentInput = $("#comment-input");
   commentInput.addEventListener("input", () => {
@@ -475,6 +504,7 @@ function applyEditability() {
   $("#app").classList.toggle("readonly", !editable);
   $("#comment-input").disabled = !editable;
   $("#bonus-input").disabled = !editable;
+  $("#note-override-input").disabled = !editable;
 
   // Bouton Verrouiller : visible si on peut verrouiller ou si déjà verrouillé (grisé)
   const lockBtn = $("#btn-lock");
@@ -491,12 +521,24 @@ function applyEditability() {
   }
 }
 
-/* Met à jour l'affichage de la note calculée / proposée */
+/* La note définitive saisie est-elle valide (vide accepté = non) ? */
+function overrideActive() {
+  if (noteOverride === "" || noteOverride === null || noteOverride === undefined) return false;
+  const n = Number(noteOverride);
+  return Number.isFinite(n) && n >= 0 && n <= 20;
+}
+
+/* Met à jour l'affichage : note calculée, note proposée (auto), note retenue */
 function refreshNote() {
   const { note, noteProposee } = computeNoteClient(current.sheet, state, bonus);
-  const fr = (n, dec) => n.toLocaleString("fr-FR", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  const fr = (n, dec) => Number(n).toLocaleString("fr-FR", { minimumFractionDigits: dec, maximumFractionDigits: dec });
   $("#note-calc").textContent = fr(note, 2) + " / 20";
   $("#note-prop").textContent = fr(noteProposee, 1) + " / 20";
+  // Note retenue = note définitive si saisie et valide, sinon note proposée
+  const retenue = overrideActive() ? Math.round(Number(noteOverride) * 100) / 100 : noteProposee;
+  const r = $("#note-retenue");
+  r.textContent = fr(retenue, retenue % 1 === 0 ? 0 : 2) + " / 20" + (overrideActive() ? " ✍" : "");
+  r.title = overrideActive() ? "Note définitive saisie par l'évaluateur" : "Note proposée automatiquement";
 }
 
 /* Mise à jour du commentaire reçue du serveur.
@@ -535,7 +577,9 @@ function buildGrid() {
   app.innerHTML = "";
   state = {};
   bonus = 0;
+  noteOverride = "";
   $("#bonus-input").value = 0;
+  $("#note-override-input").value = "";
   $("#comment-input").value = "";
   $("#comment-status").textContent = "";
 

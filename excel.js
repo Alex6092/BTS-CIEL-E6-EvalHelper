@@ -15,7 +15,7 @@ const path = require("path");
 const fs = require("fs");
 const {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, RECAP_CONFIG,
-  computeLevel, computeNote, computeFinalNote, BONUS_CELL, NOTE_CELL,
+  computeLevel, proposedNote, computeFinalNote, BONUS_CELL, NOTE_CELL,
 } = require("./hierarchy");
 
 const EXPORT_DIR = path.join(__dirname, "exports");
@@ -145,9 +145,9 @@ function fillSheetXml(xml, sheetKey, candidate, data, settings) {
 
   // Points bonus (C63, numérique : utilisé par la formule F64)
   xml = setCellNumber(xml, BONUS_CELL, bonus);
-  // Note proposée au jury (C64) = arrondi au demi-point supérieur
-  const { noteProposee } = computeNote(sheetKey, evaluation, bonus);
-  xml = setCellNumber(xml, NOTE_CELL, noteProposee);
+  // Note proposée au jury (C64) : note définitive si saisie, sinon arrondi ½ pt sup.
+  const note = proposedNote(sheetKey, evaluation, bonus, data.noteOverride);
+  xml = setCellNumber(xml, NOTE_CELL, note);
 
   return xml;
 }

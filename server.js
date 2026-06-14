@@ -15,7 +15,7 @@ const { exportEvaluation, exportFull, exportAll } = require("./excel");
 const {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
   COMP_WEIGHTS, critWeights, allLeafIds,
-  computeNote, computeFinalNote,
+  proposedNote, computeFinalNote, isValidOverride,
 } = require("./hierarchy");
 
 const PORT = process.env.PORT || 3000;
@@ -197,17 +197,18 @@ app.get("/api/candidates", auth.requireAuth, (req, res) => {
       return pub;
     }
 
-    // Établissement : notes + état de verrouillage par onglet
+    // Établissement : notes + état de verrouillage + note définitive par onglet
     const dataBySheet = fullDataFor(c.id);
     pub.notes = {};
     pub.locks = {};
+    pub.overrides = {};
     for (const key of SHEET_ORDER) {
       pub.locks[key] = !!locks[key];
+      const d = dataBySheet[key];
+      pub.overrides[key] = isValidOverride(d.noteOverride);
       // La soutenance n'est visible qu'une fois verrouillée par la commission
       const visible = key !== "SO" || soLocked;
-      pub.notes[key] = visible
-        ? computeNote(key, dataBySheet[key].evaluation, dataBySheet[key].bonus).noteProposee
-        : null;
+      pub.notes[key] = visible ? proposedNote(key, d.evaluation, d.bonus, d.noteOverride) : null;
     }
     // Note finale : seulement si la soutenance est communiquée (verrouillée)
     pub.notes.finale = soLocked ? computeFinalNote(dataBySheet).noteProposee : null;
@@ -297,6 +298,7 @@ app.get("/api/evaluation", auth.requireAuth, (req, res) => {
     state: store.getEvaluation(candidateId, sheet),
     comment: extra.text,
     bonus: extra.bonus,
+    noteOverride: extra.noteOverride,
     locked: !!lock,
     lockedAt: lock ? lock.lockedAt : null,
     lockedByName: lock ? (lock.lockedByName || lock.lockedByUser || "—") : null,
@@ -326,6 +328,7 @@ app.post("/api/export", auth.requireAuth, async (req, res) => {
       evaluation: store.getEvaluation(candidate.id, sheet),
       comment: extra.text,
       bonus: extra.bonus,
+      noteOverride: extra.noteOverride,
       dateOverride: lockDateFr(candidate.id, sheet),
       settings: getSettings(),
     });
@@ -345,6 +348,7 @@ function fullDataFor(candidateId) {
       evaluation: store.getEvaluation(candidateId, key),
       comment: extra.text,
       bonus: extra.bonus,
+      noteOverride: extra.noteOverride,
       dateOverride: lockDateFr(candidateId, key),
     };
   }
@@ -715,6 +719,7 @@ function handleWsMessage(ws, raw) {
         state: store.getEvaluation(candidateId, sheet),
         comment: extra.text,
         bonus: extra.bonus,
+        noteOverride: extra.noteOverride,
         locked: !!lock,
         lockedAt: lock ? lock.lockedAt : null,
         lockedByName: lock ? (lock.lockedByName || lock.lockedByUser || "—") : null,
@@ -753,6 +758,20 @@ function handleWsMessage(ws, raw) {
       const bonus = Math.max(0, Math.min(2, n));
       store.setBonus(ws.candidateId, ws.sheet, bonus);
       broadcastRoom(ws.room, { type: "bonus", bonus }, ws);
+    }
+
+    else if (msg.type === "noteOverride") {
+      if (!ws.room) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
+      // Vide -> efface la note définitive ; sinon nombre dans [0, 20]
+      let value = null;
+      if (!(msg.value === null || msg.value === undefined || msg.value === "")) {
+        const n = Number(msg.value);
+        if (!Number.isFinite(n) || n < 0 || n > 20) return; // invalide : ignoré
+        value = Math.round(n * 100) / 100;
+      }
+      store.setNoteOverride(ws.candidateId, ws.sheet, value);
+      broadcastRoom(ws.room, { type: "noteOverride", value }, ws);
     }
 }
 

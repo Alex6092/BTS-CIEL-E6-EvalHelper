@@ -54,10 +54,11 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS comments (
-    candidateId INTEGER NOT NULL,
-    sheet       TEXT NOT NULL,
-    text        TEXT NOT NULL DEFAULT '',
-    bonus       REAL NOT NULL DEFAULT 0,
+    candidateId  INTEGER NOT NULL,
+    sheet        TEXT NOT NULL,
+    text         TEXT NOT NULL DEFAULT '',
+    bonus        REAL NOT NULL DEFAULT 0,
+    noteOverride REAL DEFAULT NULL,   -- note définitive saisie (NULL = non saisie)
     PRIMARY KEY (candidateId, sheet),
     FOREIGN KEY (candidateId) REFERENCES candidates(id) ON DELETE CASCADE
   );
@@ -119,6 +120,7 @@ db.exec(`
 
 // Migrations sur les bases créées avant l'ajout de ces colonnes
 try { db.exec("ALTER TABLE comments ADD COLUMN bonus REAL NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE comments ADD COLUMN noteOverride REAL DEFAULT NULL"); } catch {}
 try { db.exec("ALTER TABLE candidates ADD COLUMN classId INTEGER DEFAULT NULL REFERENCES classes(id) ON DELETE SET NULL"); } catch {}
 
 const CAND_SELECT = `
@@ -177,8 +179,8 @@ const q = {
   candidateLocks: db.prepare("SELECT sheet, lockedAt FROM locks WHERE candidateId = ?"),
   insertLock: db.prepare("INSERT OR IGNORE INTO locks (candidateId, sheet, lockedAt, lockedBy) VALUES (?, ?, ?, ?)"),
 
-  // ── Commentaires + bonus ──
-  getExtra: db.prepare("SELECT text, bonus FROM comments WHERE candidateId = ? AND sheet = ?"),
+  // ── Commentaires + bonus + note définitive ──
+  getExtra: db.prepare("SELECT text, bonus, noteOverride FROM comments WHERE candidateId = ? AND sheet = ?"),
   setComment: db.prepare(`
     INSERT INTO comments (candidateId, sheet, text) VALUES (?, ?, ?)
     ON CONFLICT(candidateId, sheet) DO UPDATE SET text = excluded.text
@@ -186,6 +188,10 @@ const q = {
   setBonus: db.prepare(`
     INSERT INTO comments (candidateId, sheet, bonus) VALUES (?, ?, ?)
     ON CONFLICT(candidateId, sheet) DO UPDATE SET bonus = excluded.bonus
+  `),
+  setNoteOverride: db.prepare(`
+    INSERT INTO comments (candidateId, sheet, noteOverride) VALUES (?, ?, ?)
+    ON CONFLICT(candidateId, sheet) DO UPDATE SET noteOverride = excluded.noteOverride
   `),
 
   // ── Utilisateurs ──
@@ -314,13 +320,18 @@ module.exports = {
   lock: (candidateId, sheet, lockedAt, lockedBy) =>
     q.insertLock.run(candidateId, sheet, lockedAt, lockedBy).changes > 0,
 
-  // Commentaires + bonus — retourne { text, bonus }
+  // Commentaires + bonus + note définitive — retourne { text, bonus, noteOverride }
   getExtra: (candidateId, sheet) => {
     const r = q.getExtra.get(candidateId, sheet);
-    return r ? { text: r.text, bonus: r.bonus } : { text: "", bonus: 0 };
+    return r
+      ? { text: r.text, bonus: r.bonus, noteOverride: r.noteOverride }
+      : { text: "", bonus: 0, noteOverride: null };
   },
   setComment: (candidateId, sheet, text) => q.setComment.run(candidateId, sheet, String(text || "")),
   setBonus: (candidateId, sheet, bonus) => q.setBonus.run(candidateId, sheet, Number(bonus) || 0),
+  // value : nombre ou null (efface la note définitive)
+  setNoteOverride: (candidateId, sheet, value) =>
+    q.setNoteOverride.run(candidateId, sheet, value === null || value === undefined ? null : Number(value)),
 
   // Utilisateurs
   listUsers: () => q.listUsers.all(),

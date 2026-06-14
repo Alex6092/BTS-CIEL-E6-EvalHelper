@@ -572,15 +572,33 @@ function computeNote(sheetKey, evaluation, bonus) {
   return { note, noteProposee };
 }
 
+/* ════════════════ Note retenue (fonction CENTRALE) ════════════════
+   Renvoie la note effectivement proposée au jury pour un onglet :
+   - la NOTE DÉFINITIVE saisie par l'évaluateur si elle est renseignée,
+   - sinon la note calculée arrondie au demi-point supérieur.
+   C'est la SEULE source de vérité : utilisée par la liste des candidats,
+   l'export d'un onglet (cellule C64), et la note finale du récapitulatif.
+   Toute valeur hors [0;20] ou invalide est ignorée (retour à l'auto). */
+function isValidOverride(v) {
+  if (v === null || v === undefined || v === "") return false;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 20;
+}
+function proposedNote(sheetKey, evaluation, bonus, noteOverride) {
+  if (isValidOverride(noteOverride)) return Math.round(Number(noteOverride) * 100) / 100;
+  return computeNote(sheetKey, evaluation, bonus).noteProposee;
+}
+
 /* Note finale (comme F34 de la fiche récap) : moyenne pondérée des notes
-   proposées (C64) de Stage (×1), Revue 3 (×3) et Soutenance (×3).
-   dataBySheet = { [sheetKey]: { evaluation, bonus } } */
+   RETENUES (C64) de Stage (×1), Revue 3 (×3) et Soutenance (×3).
+   Tient compte des notes définitives éventuelles, pour rester cohérent
+   avec la formule du classeur.
+   dataBySheet = { [sheetKey]: { evaluation, bonus, noteOverride } } */
 function computeFinalNote(dataBySheet) {
   let sum = 0, coeffSum = 0;
   for (const [sheetKey, coeff] of Object.entries(RECAP_CONFIG.coeffs)) {
     const d = (dataBySheet && dataBySheet[sheetKey]) || {};
-    const { noteProposee } = computeNote(sheetKey, d.evaluation || {}, d.bonus || 0);
-    sum += noteProposee * coeff;
+    sum += proposedNote(sheetKey, d.evaluation || {}, d.bonus || 0, d.noteOverride) * coeff;
     coeffSum += coeff;
   }
   const note = Math.round((sum / coeffSum) * 100) / 100;
@@ -601,5 +619,5 @@ function allLeafIds(sheetKey) {
 module.exports = {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, RECAP_CONFIG,
   COMP_WEIGHTS, critWeights, BONUS_CELL, NOTE_CELL,
-  computeLevel, computeNote, computeFinalNote, allLeafIds,
+  computeLevel, computeNote, proposedNote, computeFinalNote, isValidOverride, allLeafIds,
 };

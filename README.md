@@ -109,10 +109,21 @@ Les **observables** (sous-critères) de chaque grille ont été extraits des com
 
 ## Note finale
 
-`note finale = (Stage×1 + Revue 3×3 + Soutenance×3) / 7` à partir des notes proposées (C64)
+`note finale = (Stage×1 + Revue 3×3 + Soutenance×3) / 7` à partir des notes retenues (C64)
 de chaque onglet, arrondie au **demi-point supérieur** et reportée en C34 de la fiche
 récapitulative (la formule F34 du classeur fait le même calcul). Les notes par revue et
 la note finale sont affichées dans la liste des candidats (établissement uniquement).
+
+### Note définitive (optionnelle)
+
+Sur chaque onglet, l'évaluateur peut saisir une **note définitive** s'il estime que la note
+proposée (arrondi ½ pt sup.) ne convient pas (ex. 12,07 → 12,5 alors qu'il veut 12).
+- Champ optionnel : laissé vide → la note proposée automatique s'applique.
+- Si renseignée (0–20), c'est elle qui est **retenue** partout : affichage, cellule `C64` de
+  l'onglet, et **note finale** du récapitulatif (cohérent avec le calcul interne d'Excel).
+- Le calcul de la « note retenue » est centralisé dans une seule fonction
+  (`proposedNote` dans `hierarchy.js`), utilisée par la liste des candidats et tous les exports,
+  pour garantir l'unicité du résultat. Soumise aux mêmes règles que le reste (verrou, confidentialité soutenance).
 
 ## Divers
 
