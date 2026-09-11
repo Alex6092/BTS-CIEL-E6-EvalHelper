@@ -9,6 +9,101 @@ npm install
 npm start
 ```
 
+### Prérequis sur Linux (Debian / Ubuntu)
+
+`better-sqlite3` est un module natif. Si aucun binaire précompilé n'est disponible pour la
+plateforme, `npm install` le compile localement, ce qui nécessite les outils de compilation.
+Sans eux, l'installation échoue avec `gyp ERR! ... not found: make`.
+
+```bash
+sudo apt update && sudo apt install -y build-essential python3
+rm -rf node_modules && npm install
+```
+
+- Node.js **22 LTS** recommandé (20.x fonctionne encore mais n'est plus maintenu).
+- Ne jamais copier `node_modules` depuis une autre machine ou un autre OS : toujours
+  lancer `npm install` sur la machine cible.
+
+## Déploiement (serveur Linux)
+
+Sous Linux, un compte non-root ne peut pas écouter sur un port inférieur à 1024 (dont le 80) :
+`PORT=80 npm start` échoue avec « Permission refusée ». Configuration recommandée :
+l'application tourne sur le port 3000 sous le compte `debian`, et **nginx** la publie sur le port 80.
+
+### 1. Service systemd (démarrage automatique, redémarrage en cas de crash)
+
+`/etc/systemd/system/evale6.service` :
+
+```ini
+[Unit]
+Description=Evaluation E6 BTS CIEL
+After=network.target
+
+[Service]
+Type=simple
+User=debian
+WorkingDirectory=/home/debian/EvalE6/BTS-CIEL-E6-EvalHelper
+Environment=PORT=3000
+ExecStart=/usr/bin/node server.js
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now evale6
+journalctl -u evale6 -f        # logs (dont le mot de passe admin initial)
+```
+
+### 2. nginx en reverse proxy sur le port 80
+
+```bash
+sudo apt install -y nginx
+```
+
+`/etc/nginx/sites-available/evale6` :
+
+```nginx
+server {
+    listen 80;
+    server_name _;
+
+    client_max_body_size 30m;               # upload des fichiers Excel (25 Mo max côté appli)
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;   # indispensable pour le WebSocket
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 1h;                   # évite la coupure du WebSocket inactif
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/evale6 /etc/nginx/sites-enabled/evale6
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Sans les en-têtes `Upgrade`/`Connection`, les pages s'affichent mais la synchronisation
+temps réel ne passe pas (badge « Hors ligne »). nginx permet aussi d'ajouter HTTPS plus tard.
+
+### Alternative rapide (sans nginx)
+
+Autoriser Node à écouter sur les ports privilégiés :
+
+```bash
+sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(which node)")"
+PORT=80 npm start
+```
+
+Inconvénients : le droit s'applique à **tous** les scripts Node de la machine, et il est
+perdu à chaque mise à jour de Node (à refaire).
+
 Le serveur affiche les adresses d'accès :
 
 ```

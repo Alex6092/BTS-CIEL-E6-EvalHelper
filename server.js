@@ -792,6 +792,23 @@ function broadcastAll(payload) {
 store.purgeSessions();
 const created = auth.ensureDefaultAdmin();
 
+// Erreurs d'écoute (port privilégié, port déjà pris…) : message clair au lieu
+// d'une pile d'erreur. `ws` relaie les erreurs du serveur HTTP sur `wss`.
+wss.on("error", (err) => {
+  if (err.code === "EACCES") {
+    console.error(`\n  ✖ Permission refusée pour écouter sur le port ${PORT}.`);
+    console.error(`    Sous Linux, les ports < 1024 sont réservés à root.`);
+    console.error(`    Utilisez un port >= 1024 (ex. PORT=3000) derrière un reverse proxy,`);
+    console.error(`    ou voir la section « Déploiement » du README.\n`);
+  } else if (err.code === "EADDRINUSE") {
+    console.error(`\n  ✖ Le port ${PORT} est déjà utilisé par un autre programme.`);
+    console.error(`    Arrêtez-le ou choisissez un autre port (ex. PORT=3001).\n`);
+  } else {
+    console.error("\n  ✖ Erreur du serveur :", err.message, "\n");
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
   console.log(`\n  ✅ Serveur d'évaluation E6 démarré`);
   console.log(`  ➜  Local   : http://localhost:${PORT}`);
