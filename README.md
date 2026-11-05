@@ -9,6 +9,9 @@ npm install
 npm start
 ```
 
+Tests automatiques (inscription, mots de passe, limitation des tentatives) : `npm test`.
+Ils démarrent le serveur sur une base temporaire et ne touchent pas à `data/evaluations.db`.
+
 ### Prérequis sur Linux (Debian / Ubuntu)
 
 `better-sqlite3` est un module natif. Si aucun binaire précompilé n'est disponible pour la
@@ -78,10 +81,15 @@ server {
         proxy_set_header Upgrade $http_upgrade;   # indispensable pour le WebSocket
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;  # adresse réelle du client (limitation des tentatives)
         proxy_read_timeout 1h;                   # évite la coupure du WebSocket inactif
     }
 }
 ```
+
+Sans `X-Forwarded-For`, l'application voit toutes les connexions comme venant de nginx
+(`127.0.0.1`) : la limitation des tentatives de connexion / d'inscription s'applique alors
+à tout le monde à la fois au lieu de s'appliquer par poste.
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/evale6 /etc/nginx/sites-enabled/evale6
@@ -111,7 +119,7 @@ Le serveur affiche les adresses d'accès :
 ➜  Réseau  : http://192.168.x.x:3000     ← à donner aux autres évaluateurs (même réseau)
 ```
 
-Au **premier lancement**, un compte administrateur est créé : **admin / admin** (affiché dans la console). Changez ce mot de passe depuis le panneau d'administration.
+Au **premier lancement**, un compte administrateur est créé : **admin / admin** (affiché dans la console). Changez ce mot de passe dès la première connexion, depuis **« Mon compte »**.
 
 Pour changer le port : `PORT=8080 npm start`.
 
@@ -128,7 +136,10 @@ Pour changer le port : `PORT=8080 npm start`.
 | Export d'un onglet | Soutenance | ✓ (ses classes) | ✓ |
 | Export complet (5 onglets) | — | ✓ (ses classes) | ✓ |
 | **Export groupé (zip)** | — | ✓ (ses classes) | ✓ (tous) |
+| Créer son compte (si les inscriptions sont ouvertes) | ✓ | — | — |
+| Changer son propre mot de passe (« Mon compte ») | ✓ | ✓ | ✓ |
 | Comptes, classes, commissions, paramètres, purge | — | — | ✓ |
+| Ouvrir / fermer les inscriptions | — | — | ✓ |
 
 **Pourquoi ?** La soutenance est menée par un jury externe (la commission) qui ne doit pas être influencé par les notes des autres oraux : il ne voit que la saisie soutenance. Inversement, l'onglet Soutenance n'est **modifiable que par la commission** — l'établissement le voit en lecture seule, pour éviter toute altération de l'évaluation du jury. L'établissement trace tous les oraux et génère l'Excel final complet — c'est l'Excel qui calcule la note.
 
@@ -140,6 +151,31 @@ Deux regroupements distincts, configurés par l'**administrateur** :
 - **Commission** (jury externe de soutenance) : rassemble des **membres de commission** et les **candidats** qu'ils évaluent en soutenance.
 
 La création/modification des candidats et tous les rattachements sont réservés à l'administrateur.
+
+## Comptes et inscriptions
+
+Pour que l'administrateur n'ait pas à connaître les mots de passe des jurés, les membres de
+commission peuvent **créer leur compte eux-mêmes** :
+
+1. Dans **Administration → Inscriptions des membres de commission**, l'admin clique sur
+   **« Ouvrir les inscriptions »** et communique l'adresse de l'application aux jurés.
+2. L'écran de connexion affiche alors un lien **« Créer un compte »** : le juré choisit son
+   identifiant (3 à 50 caractères : lettres sans accent, chiffres, `.` `_` `-`), indique ses
+   nom et prénom et son mot de passe (8 caractères minimum). Il est connecté directement.
+3. Le compte a **toujours** le rôle « Membre de commission » (le serveur ignore tout autre rôle)
+   et **ne voit aucun candidat** tant que l'admin ne l'a pas associé à une commission.
+   Dans la liste des comptes, il porte les badges **« Auto-inscrit »** et **« ⏳ Sans commission »** ;
+   un compteur signale les comptes en attente d'affectation.
+4. L'admin vérifie l'identité du juré, l'associe à sa commission (section « Commissions »),
+   puis **ferme les inscriptions**. Un compte inconnu ou en double se supprime simplement.
+
+L'admin peut toujours créer lui-même des comptes (enseignants, administrateurs, ou jurés) avec un
+**mot de passe provisoire** (champ masqué). Chaque utilisateur, quel que soit son rôle, change
+ensuite son mot de passe depuis **« Mon compte »** (le mot de passe actuel est demandé).
+
+- Changer son mot de passe **déconnecte ses autres sessions** (autres navigateurs ou appareils).
+- En cas d'oubli, l'admin **réinitialise** le mot de passe (bouton « Mot de passe ») avec un
+  nouveau mot de passe provisoire : toutes les sessions du compte sont fermées.
 
 ## Verrouillage des onglets
 
@@ -230,7 +266,20 @@ proposée (arrondi ½ pt sup.) ne convient pas (ex. 12,07 → 12,5 alors qu'il v
 - Mots de passe : **scrypt** avec sel aléatoire de 16 octets par compte (fonction à dérivation
   coûteuse en mémoire, conçue pour le stockage de mots de passe — plus robuste que SHA-512+sel
   face aux attaques par GPU), comparaison à temps constant.
+- Mots de passe jamais affichés en clair dans l'interface (champs masqués, y compris pour la
+  réinitialisation par l'admin et la confirmation du verrouillage du lot) ; 8 caractères
+  minimum pour tout nouveau mot de passe.
 - Sessions : jeton aléatoire 256 bits en cookie **HttpOnly** (SameSite=Lax), expiration 7 jours.
+  Changement / réinitialisation de mot de passe et suppression de compte : les sessions concernées
+  sont supprimées et leurs connexions WebSocket fermées.
+- **Limitation des tentatives** (en mémoire, par adresse IP) : connexion bloquée 15 min après
+  10 échecs pour un même identifiant (ou 50 échecs depuis une même adresse) ; inscription limitée
+  à 30 tentatives par adresse et par 15 min ; vérification du mot de passe d'un compte connecté
+  (« Mon compte », verrouillage du lot) bloquée après 10 échecs. Réponse HTTP 429.
+- Inscription publique : fermée par défaut, ouverte/fermée par l'admin, rôle imposé
+  « commission », aucun accès aux candidats avant affectation par l'admin.
+- Les noms et identifiants saisis par les utilisateurs sont toujours affichés comme du **texte**
+  (jamais interprétés en HTML) : pas d'injection de script via le formulaire d'inscription.
 - **Toutes** les routes API et le WebSocket exigent une session valide ; chaque action est
   contrôlée selon le rôle **côté serveur** (un client trafiqué ne peut ni écrire la soutenance
   en tant qu'admin/enseignant, ni accéder aux candidats/onglets hors périmètre commission).
@@ -245,7 +294,9 @@ proposée (arrondi ½ pt sup.) ne convient pas (ex. 12,07 → 12,5 alors qu'il v
 | Fichier | Rôle |
 |---|---|
 | `server.js` | Express + WebSocket + API REST + contrôle d'accès |
-| `auth.js` | Mots de passe (scrypt), sessions cookie, rôles |
+| `auth.js` | Mots de passe (scrypt), règles des identifiants / mots de passe, sessions cookie, rôles |
+| `ratelimit.js` | Limitation des tentatives (connexion, inscription, vérification de mot de passe) |
+| `test/` | Tests automatiques (`npm test`, module de test intégré à Node, sans dépendance) |
 | `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, **verrous**, comptes, classes, commissions, paramètres ; archive/purge. Chemin surchargeable via `DB_FILE`. |
 | `excel.js` | Génération des copies Excel remplies |
 | `hierarchy.js` | Grilles des 5 onglets + mapping lignes/colonnes Excel |

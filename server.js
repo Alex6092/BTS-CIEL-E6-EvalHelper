@@ -959,7 +959,7 @@ server.listen(PORT, () => {
   }
   if (created) {
     console.log(`\n  ⚠ Compte administrateur créé : ${created.username} / ${created.password}`);
-    console.log(`    Changez ce mot de passe depuis le panneau d'administration.`);
+    console.log(`    Changez ce mot de passe dès la première connexion (bouton « Mon compte »).`);
   }
   console.log("");
 });
