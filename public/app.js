@@ -124,6 +124,11 @@ async function api(url, opts) {
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && url !== "/api/login") { showLogin(); throw new Error("Session expirée — reconnectez-vous."); }
+  // Mot de passe provisoire : le serveur refuse tout tant qu'il n'est pas changé
+  if (res.status === 403 && data.mustChangePassword && me) {
+    me.user.mustChangePassword = true;
+    openAccount(true);
+  }
   if (!res.ok) throw new Error(data.error || "Erreur serveur");
   return data;
 }
@@ -205,6 +210,15 @@ async function enterApp() {
   $("#conn-status").classList.remove("hidden");
   $("#ub-name").textContent = me.user.displayName || me.user.username;
   $("#ub-role").textContent = ROLE_LABELS[me.user.role] || me.user.role;
+
+  // Mot de passe provisoire : rien d'autre n'est accessible avant de le changer
+  if (me.user.mustChangePassword) {
+    $("#btn-admin").classList.add("hidden");
+    $("#conn-status").classList.add("hidden"); // pas de connexion temps réel avant le changement
+    openAccount(true);
+    return;
+  }
+
   $("#btn-admin").classList.toggle("hidden", !isAdmin());
   $("#btn-toggle-add").classList.toggle("hidden", !isAdmin()); // candidats gérés par l'admin
   $("#btn-export-full").classList.toggle("hidden", !canEdit());
@@ -249,6 +263,8 @@ function connectWS() {
       if (me) { showLogin(); toast("Votre session a été fermée — reconnectez-vous.", "error"); }
       return;
     }
+    // 4003 : mot de passe provisoire à changer -> pas de reconnexion
+    if (ev.code === 4003) { if (me) openAccount(true); return; }
     if (me) setTimeout(connectWS, 1500);
   };
   ws.onmessage = (ev) => {
@@ -486,7 +502,9 @@ function bindUI() {
   $("#btn-admin").onclick = () => openAdmin();
   $("#btn-admin-back").onclick = () => { show("screen-candidates"); loadCandidates(); };
 
-  $("#btn-account").onclick = openAccount;
+  $("#btn-account").onclick = () => openAccount(false);
+  $("#btn-expand-all").onclick = expandAll;
+  $("#btn-collapse-all").onclick = collapseAll;
   $("#btn-account-back").onclick = () => {
     current = { candidate: null, sheet: null };
     show("screen-candidates");
@@ -967,8 +985,15 @@ async function exportAllExcel() {
   } catch (e) { toast(e.message, "error"); }
 }
 
-/* ════════════════ Mon compte (tous les rôles) ════════════════ */
-function openAccount() {
+/* ════════════════ Mon compte (tous les rôles) ════════════════
+   forced = mot de passe provisoire à remplacer : pas de bouton Retour,
+   l'application s'ouvre une fois le mot de passe changé. */
+let accountForced = false;
+
+function openAccount(forced = false) {
+  accountForced = forced === true;
+  $("#account-forced").classList.toggle("hidden", !accountForced);
+  $("#btn-account-back").classList.toggle("hidden", accountForced);
   $("#account-form").reset();
   $("#account-error").textContent = "";
   $("#acc-username").textContent = me.user.username;
@@ -990,6 +1015,13 @@ async function changeOwnPassword(e) {
       body: JSON.stringify({ currentPassword: $("#acc-current").value, newPassword }),
     });
     $("#account-form").reset();
+    if (accountForced) {
+      accountForced = false;
+      me.user.mustChangePassword = false;
+      await enterApp();
+      toast("Mot de passe enregistré ✓ — bienvenue !", "success");
+      return;
+    }
     toast("Mot de passe modifié ✓ — vos autres sessions ont été déconnectées.", "success");
   } catch (e2) {
     err.textContent = e2.message;
@@ -1105,7 +1137,7 @@ async function loadUsers() {
     bPass.onclick = async () => {
       const p = await askPassword({
         title: "Réinitialiser le mot de passe",
-        message: `Nouveau mot de passe provisoire pour ${u.username}. L'utilisateur pourra le changer depuis « Mon compte ».`,
+        message: `Nouveau mot de passe provisoire pour ${u.username}. L'utilisateur devra le remplacer à sa prochaine connexion.`,
         label: "Nouveau mot de passe",
         withConfirm: true,
         minLength: PASSWORD_MIN,

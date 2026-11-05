@@ -87,6 +87,11 @@
     <button class="btn btn-outline btn-sm" id="btn-account-back">← Retour</button>
   </div>
   <div class="card admin-card">
+    <p id="account-forced" class="forced-banner hidden">
+      🔑 Votre mot de passe est <strong>provisoire</strong> :
+      choisissez votre propre mot de passe pour accéder à l'application.
+      Personne d'autre ne le connaîtra.
+    </p>
     <h3>🔑 Changer mon mot de passe</h3>
     <p class="admin-hint">Identifiant : <strong id="acc-username"></strong>.
       Après le changement, vos autres sessions ouvertes (autres navigateurs ou appareils) seront déconnectées.</p>
@@ -220,8 +225,8 @@
   </div>
 
   <div style="max-width:880px;margin:0 auto 1rem;display:flex;gap:.6rem;justify-content:flex-end">
-    <button class="btn btn-outline btn-sm" onclick="expandAll()">Tout déplier</button>
-    <button class="btn btn-outline btn-sm" onclick="collapseAll()">Tout replier</button>
+    <button class="btn btn-outline btn-sm" id="btn-expand-all">Tout déplier</button>
+    <button class="btn btn-outline btn-sm" id="btn-collapse-all">Tout replier</button>
   </div>
 
   <div id="app"></div>
@@ -273,7 +278,7 @@
   <!-- Utilisateurs -->
   <div class="card admin-card">
     <h3>👤 Comptes utilisateurs</h3>
-    <p class="admin-hint">Le mot de passe saisi ici est <strong>provisoire</strong> : chaque utilisateur peut ensuite le changer lui-même depuis « Mon compte », pour que vous ne le connaissiez plus.</p>
+    <p class="admin-hint">Le mot de passe saisi ici est <strong>provisoire</strong> : l'utilisateur devra le remplacer par le sien dès sa première connexion, pour que vous ne le connaissiez plus. Il en va de même après une réinitialisation (bouton « Mot de passe »).</p>
     <form id="user-form" class="inline-form">
       <div class="field">
         <label for="u-username">Identifiant *</label>

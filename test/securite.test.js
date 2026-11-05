@@ -51,14 +51,15 @@ async function serverAlive() {
 
 before(async () => {
   srv = await h.startServer();
-  admin = await login("admin", "admin");
+  admin = await h.adminClient(srv);
   cand = (await admin("POST", "/api/candidates", { nom: "Securite", prenom: "Test" })).data;
   createdCandidates.push(cand.id);
   com = (await admin("POST", "/api/commissions", { name: "Commission S" })).data;
   for (const [u, role] of [["j1", "commission"], ["j2", "commission"], ["jx", "commission"], ["t1", "teacher"]]) {
-    const r = await admin("POST", "/api/users", { username: u, password: `motdepasse-${u}`, role });
+    const r = await admin("POST", "/api/users", { username: u, password: `provisoire-${u}`, role });
     assert.equal(r.status, 200, JSON.stringify(r.data));
     ids[u] = r.data.id;
+    await h.activate(srv.base, u, `provisoire-${u}`, `motdepasse-${u}`);
   }
   for (const u of ["j1", "j2"]) await admin("POST", `/api/commissions/${com.id}/members`, { userId: ids[u] });
   await admin("POST", `/api/commissions/${com.id}/candidates`, { candidateId: cand.id });
@@ -167,19 +168,63 @@ test("M3 : un juré retiré de sa commission ne reçoit plus les saisies en dire
   assert.equal((await subscribe(w1, cand.id, "SO")).canEdit, true);
   assert.equal((await subscribe(w2, cand.id, "SO")).canEdit, true);
 
-  await admin("DELETE", `/api/commissions/${com.id}/members/${ids.j2}`);
-  const received = collect(w2, 600);
-  w1.send(JSON.stringify({ type: "comment", text: "Commentaire confidentiel" }));
-  const msgs = await received;
-  assert.ok(!msgs.some(m => m.type === "comment"), "le commentaire a été reçu : " + JSON.stringify(msgs));
-  assert.ok(msgs.some(m => m.type === "revoked"));
-  // et il ne peut plus écrire
-  w2.send(JSON.stringify({ type: "set", itemId: "C01-1-1", checked: true }));
-  await h.sleep(200);
-  const ev = await (await login("j1", "motdepasse-j1"))("GET", `/api/evaluation?candidateId=${cand.id}&sheet=SO`);
-  assert.notEqual(ev.data.state["C01-1-1"], true);
-  w1.close(); w2.close();
-  await admin("POST", `/api/commissions/${com.id}/members`, { userId: ids.j2 }); // remis pour la suite
+  const received = collect(w2, 800); // écoute avant le retrait : l'avertissement est immédiat
+  try {
+    await admin("DELETE", `/api/commissions/${com.id}/members/${ids.j2}`);
+    w1.send(JSON.stringify({ type: "comment", text: "Commentaire confidentiel" }));
+    const msgs = await received;
+    assert.ok(!msgs.some(m => m.type === "comment"), "le commentaire a été reçu : " + JSON.stringify(msgs));
+    assert.ok(msgs.some(m => m.type === "revoked"));
+    // et il ne peut plus écrire
+    w2.send(JSON.stringify({ type: "set", itemId: "C01-1-1", checked: true }));
+    await h.sleep(200);
+    const ev = await (await login("j1", "motdepasse-j1"))("GET", `/api/evaluation?candidateId=${cand.id}&sheet=SO`);
+    assert.notEqual(ev.data.state["C01-1-1"], true);
+  } finally {
+    w1.close(); w2.close();
+    await admin("POST", `/api/commissions/${com.id}/members`, { userId: ids.j2 }); // remis pour la suite
+  }
+});
+
+test("M3 : un juré seul dans la salle est prévenu dès que l'admin lui retire l'accès", async () => {
+  const j2 = await login("j2", "motdepasse-j2");
+  const w2 = await openSocket(j2);
+  await subscribe(w2, cand.id, "SO");
+  const revoked = waitFor(w2, m => m.type === "revoked");
+  try {
+    await admin("DELETE", `/api/commissions/${com.id}/members/${ids.j2}`);
+    assert.ok(await revoked, "le juré n'a pas été prévenu");
+    // Se réabonner est refusé (plus d'accès) et une saisie hors salle est ignorée
+    const answer = waitFor(w2, m => m.type === "state");
+    w2.send(JSON.stringify({ type: "subscribe", candidateId: cand.id, sheet: "SO" }));
+    w2.send(JSON.stringify({ type: "set", itemId: "C01-1-2", checked: true }));
+    assert.equal(await answer, null);
+  } finally {
+    w2.close();
+    await admin("POST", `/api/commissions/${com.id}/members`, { userId: ids.j2 });
+  }
+});
+
+test("M3 : une saisie refusée (onglet verrouillé entre-temps) resynchronise l'écran de son auteur", async () => {
+  const c2 = (await admin("POST", "/api/candidates", { nom: "Verrou", prenom: "Pendant" })).data;
+  createdCandidates.push(c2.id);
+  await admin("POST", `/api/commissions/${com.id}/candidates`, { candidateId: c2.id });
+  const j1 = await login("j1", "motdepasse-j1");
+  const w1 = await openSocket(j1);
+  assert.equal((await subscribe(w1, c2.id, "SO")).canEdit, true);
+  // Verrouillage direct en base, sans notification (cas d'une course)
+  const Database = require("better-sqlite3");
+  const db = new Database(srv.dbFile);
+  db.prepare("INSERT INTO locks (candidateId, sheet, lockedAt, lockedBy) VALUES (?, 'SO', ?, NULL)").run(c2.id, new Date().toISOString());
+  db.close();
+  const state = waitFor(w1, m => m.type === "state");
+  w1.send(JSON.stringify({ type: "set", itemId: "C01-1-1", checked: true }));
+  const s = await state;
+  assert.ok(s, "aucune resynchronisation");
+  assert.equal(s.locked, true);
+  assert.equal(s.canEdit, false);
+  assert.notEqual(s.state["C01-1-1"], true);
+  w1.close();
 });
 
 /* ── L1 : note définitive de soutenance avant verrouillage ── */

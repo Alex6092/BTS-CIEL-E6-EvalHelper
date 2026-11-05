@@ -21,12 +21,18 @@ function freePort() {
   });
 }
 
-/* Démarre server.js ; retourne { base, wsBase, port, output(), stop() } */
+// Mot de passe initial (provisoire) de l'admin des serveurs de test, puis
+// le mot de passe définitif qu'il choisit
+const ADMIN_INITIAL_PASSWORD = "admin-provisoire";
+const ADMIN_PASSWORD = "admin-definitif";
+
+/* Démarre server.js ; retourne { base, wsBase, port, dbFile, output(), stop() } */
 async function startServer(extraEnv = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "e6-test-"));
   const port = await freePort();
+  const dbFile = path.join(tmpDir, "test.db");
   const proc = spawn(process.execPath, [path.join(__dirname, "..", "server.js")], {
-    env: { ...process.env, PORT: String(port), DB_FILE: path.join(tmpDir, "test.db"), ...extraEnv },
+    env: { ...process.env, PORT: String(port), DB_FILE: dbFile, ADMIN_INITIAL_PASSWORD, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -34,12 +40,14 @@ async function startServer(extraEnv = {}) {
   proc.stderr.on("data", d => { out += d; });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Le serveur n'a pas démarré :\n" + out)), 10000);
-    const check = () => { if (out.includes("démarré")) { clearTimeout(timer); resolve(); } };
+    // Les lignes qui suivent « démarré » (compte admin créé…) peuvent arriver
+    // dans un second temps : on les laisse arriver avant de rendre la main
+    const check = () => { if (out.includes("démarré")) { clearTimeout(timer); setTimeout(resolve, 200); } };
     proc.stdout.on("data", check);
     proc.once("exit", (code) => { clearTimeout(timer); reject(new Error(`Serveur arrêté (code ${code}) :\n${out}`)); });
   });
   return {
-    port, tmpDir, proc,
+    port, tmpDir, proc, dbFile,
     base: `http://127.0.0.1:${port}`,
     wsBase: `ws://127.0.0.1:${port}`,
     output: () => out,
@@ -83,6 +91,18 @@ async function login(base, username, password) {
   return c;
 }
 
+/* Première connexion d'un compte au mot de passe provisoire : le remplace
+   par `finalPassword` et retourne le client connecté */
+async function activate(base, username, provisional, finalPassword) {
+  const c = await login(base, username, provisional);
+  const r = await c("POST", "/api/me/password", { currentPassword: provisional, newPassword: finalPassword });
+  assert.equal(r.status, 200, `activation de ${username} : ${JSON.stringify(r.data)}`);
+  return c;
+}
+
+// Admin du serveur de test, mot de passe provisoire déjà remplacé
+const adminClient = (srv) => activate(srv.base, "admin", ADMIN_INITIAL_PASSWORD, ADMIN_PASSWORD);
+
 /* Ouvre un WebSocket avec le cookie du client (et d'éventuels en-têtes) */
 function openSocket(wsBase, c, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -113,4 +133,7 @@ function closeCode(ws, ms = 1000) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-module.exports = { startServer, client, login, openSocket, nextMessage, closeCode, sleep };
+module.exports = {
+  ADMIN_INITIAL_PASSWORD, ADMIN_PASSWORD,
+  startServer, client, login, activate, adminClient, openSocket, nextMessage, closeCode, sleep,
+};

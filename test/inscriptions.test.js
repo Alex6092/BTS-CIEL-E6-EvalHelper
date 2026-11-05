@@ -20,7 +20,7 @@ const nextMessage = h.nextMessage;
 
 before(async () => {
   srv = await h.startServer();
-  admin = await login("admin", "admin"); // compte créé au premier lancement
+  admin = await h.adminClient(srv); // mot de passe provisoire déjà remplacé
 });
 
 after(async () => {
@@ -163,8 +163,14 @@ test("un enseignant peut changer son mot de passe provisoire", async () => {
   r = await admin("POST", "/api/users", { username: "prof1", displayName: "M. Prof", password: "provisoire-1", role: "teacher" });
   assert.equal(r.status, 200);
   const prof = await login("prof1", "provisoire-1");
+  // Mot de passe provisoire : tout est refusé tant qu'il n'est pas changé
+  assert.equal((await prof("GET", "/api/me")).data.user.mustChangePassword, true);
+  r = await prof("GET", "/api/candidates");
+  assert.equal(r.status, 403);
+  assert.equal(r.data.mustChangePassword, true);
   r = await prof("POST", "/api/me/password", { currentPassword: "provisoire-1", newPassword: "secret-du-prof" });
   assert.equal(r.status, 200);
+  assert.equal((await prof("GET", "/api/candidates")).status, 200);
   await login("prof1", "secret-du-prof");
 });
 
@@ -174,7 +180,10 @@ test("réinitialisation par l'admin : toutes les sessions du compte sont fermée
   assert.equal((await admin("POST", `/api/users/${jureId}/password`, { password: "court" })).status, 400);
   assert.equal((await admin("POST", `/api/users/${jureId}/password`, { password: "provisoire-2" })).status, 200);
   assert.equal((await jure("GET", "/api/me")).status, 401);
-  await login(JURE.username, "provisoire-2");
+  const reconnecte = await login(JURE.username, "provisoire-2");
+  // le mot de passe réinitialisé est provisoire : à changer avant toute autre action
+  assert.equal((await reconnecte("GET", "/api/me")).data.user.mustChangePassword, true);
+  assert.equal((await reconnecte("GET", "/api/candidates")).status, 403);
   assert.equal((await admin("GET", "/api/me")).status, 200); // l'admin reste connecté
 });
 
