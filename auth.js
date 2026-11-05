@@ -11,6 +11,23 @@ const store = require("./db");
 const SESSION_DAYS = 7;
 const COOKIE_NAME = "e6session";
 
+// ── Règles des identifiants et des nouveaux mots de passe ──
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 500;
+// Identifiant choisi à l'inscription : ASCII uniquement (pas d'espace, pas de
+// caractère trompeur ou interprétable en HTML)
+const USERNAME_RE = /^[A-Za-z0-9._-]{3,50}$/;
+const USERNAME_RULE = "3 à 50 caractères : lettres sans accent, chiffres, point, tiret ou tiret bas.";
+
+// Retourne un message d'erreur, ou null si le nouveau mot de passe est acceptable
+function checkNewPassword(password) {
+  if (typeof password !== "string" || password.length < PASSWORD_MIN) {
+    return `Le mot de passe doit contenir au moins ${PASSWORD_MIN} caractères.`;
+  }
+  if (password.length > PASSWORD_MAX) return "Mot de passe trop long.";
+  return null;
+}
+
 // ── Mots de passe (scrypt) ──
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -104,6 +121,7 @@ function ensureDefaultAdmin() {
 
 module.exports = {
   COOKIE_NAME,
+  PASSWORD_MIN, USERNAME_RE, USERNAME_RULE, checkNewPassword,
   hashPassword, verifyPassword,
   createSession, userFromRequest,
   requireAuth, requireRole,

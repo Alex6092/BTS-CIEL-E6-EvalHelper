@@ -11,6 +11,7 @@ const { WebSocketServer } = require("ws");
 
 const store = require("./db");
 const auth = require("./auth");
+const { createLimiter, tooManyAttempts } = require("./ratelimit");
 const { exportEvaluation, exportFull, exportAll } = require("./excel");
 const {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
@@ -48,8 +49,24 @@ function optStrField(v, max = 200) {
   return typeof v === "string" ? v.trim().slice(0, max) : null;
 }
 
+/* ── Limitation des tentatives ──
+   - connexion : échecs comptés par (IP + identifiant) et par IP
+   - inscription : toutes les tentatives, par IP (marge pour un groupe de
+     jurés qui s'inscrit au même moment depuis le même réseau)
+   - vérification du mot de passe d'un compte connecté (changement de mot
+     de passe, verrouillage du lot) : échecs par utilisateur */
+const MIN15 = 15 * 60 * 1000;
+const loginUserLimiter = createLimiter({ windowMs: MIN15, max: 10 });
+const loginIpLimiter = createLimiter({ windowMs: MIN15, max: 50 });
+const registerLimiter = createLimiter({ windowMs: MIN15, max: 30 });
+const passwordCheckLimiter = createLimiter({ windowMs: MIN15, max: 10 });
+
 const app = express();
 app.disable("x-powered-by");
+// Derrière nginx (même machine), req.ip = adresse réelle du client, lue dans
+// X-Forwarded-For. L'en-tête n'est pris en compte que si la connexion vient
+// de la machine elle-même : un client distant ne peut pas falsifier son IP.
+app.set("trust proxy", "loopback");
 app.use(express.json({ limit: "200kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -134,20 +151,114 @@ function lockDateFr(candidateId, sheet) {
 
 /* ════════════════ Authentification ════════════════ */
 
+function setSessionCookie(res, token) {
+  res.setHeader("Set-Cookie",
+    `${auth.COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${7 * 24 * 3600}; SameSite=Lax`);
+}
+
 app.post("/api/login", (req, res) => {
   const username = strField((req.body || {}).username, 100);
   const password = (req.body || {}).password;
   if (!username || typeof password !== "string" || password.length > 500) {
     return res.status(401).json({ error: "Identifiants invalides." });
   }
+  const ipKey = req.ip;
+  const userKey = req.ip + "|" + username.toLowerCase();
+  const wait = Math.max(loginIpLimiter.blockedFor(ipKey), loginUserLimiter.blockedFor(userKey));
+  if (wait) return tooManyAttempts(res, wait);
+
   const user = store.getUserByName(username);
   if (!user || !auth.verifyPassword(password, user.passwordHash)) {
+    loginIpLimiter.hit(ipKey);
+    loginUserLimiter.hit(userKey);
     return res.status(401).json({ error: "Identifiants invalides." });
   }
-  const token = auth.createSession(user.id);
-  res.setHeader("Set-Cookie",
-    `${auth.COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${7 * 24 * 3600}; SameSite=Lax`);
+  loginUserLimiter.reset(userKey);
+  setSessionCookie(res, auth.createSession(user.id));
   res.json({ user: publicUser(user), allowedSheets: auth.allowedSheets(user) });
+});
+
+/* ── Inscription publique des membres de commission ──
+   Ouverte / fermée par l'administrateur. Le compte créé a TOUJOURS le rôle
+   « commission » (tout rôle envoyé par le client est ignoré) et ne voit aucun
+   candidat tant que l'admin ne l'a pas associé à une commission. */
+function registrationOpen() {
+  return store.getSetting("registrationOpen") === "1";
+}
+
+// Public : l'écran de connexion affiche le lien « Créer un compte » si ouvert
+app.get("/api/registration", (_req, res) => {
+  res.json({ open: registrationOpen() });
+});
+
+// Admin : ouvrir / fermer les inscriptions
+app.post("/api/registration", auth.requireRole("admin"), (req, res) => {
+  const open = (req.body || {}).open;
+  if (typeof open !== "boolean") return res.status(400).json({ error: "Valeur invalide." });
+  store.setSetting("registrationOpen", open ? "1" : "0");
+  res.json({ open });
+});
+
+app.post("/api/register", (req, res) => {
+  const wait = registerLimiter.blockedFor(req.ip);
+  if (wait) return tooManyAttempts(res, wait);
+  registerLimiter.hit(req.ip);
+
+  // Revérifié à chaque envoi : le formulaire a pu rester ouvert à l'écran
+  if (!registrationOpen()) {
+    return res.status(403).json({ error: "Les inscriptions sont fermées. Contactez l'administrateur." });
+  }
+  const body = req.body || {};
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!auth.USERNAME_RE.test(username)) {
+    return res.status(400).json({ error: "Identifiant invalide : " + auth.USERNAME_RULE });
+  }
+  const displayName = strField(body.displayName, 100);
+  if (!displayName) return res.status(400).json({ error: "Nom et prénom requis." });
+  const pwError = auth.checkNewPassword(body.password);
+  if (pwError) return res.status(400).json({ error: pwError });
+  if (store.getUserByNameNoCase(username)) {
+    return res.status(400).json({ error: "Cet identifiant est déjà utilisé." });
+  }
+
+  let user;
+  try {
+    user = store.addUser(username, auth.hashPassword(body.password), displayName, "commission", true);
+  } catch {
+    // Deux inscriptions simultanées avec le même identifiant (contrainte UNIQUE)
+    return res.status(400).json({ error: "Cet identifiant est déjà utilisé." });
+  }
+  setSessionCookie(res, auth.createSession(user.id));
+  res.json({ user: publicUser(user), allowedSheets: auth.allowedSheets(user) });
+});
+
+// Changement de son propre mot de passe (tous les rôles)
+app.post("/api/me/password", auth.requireAuth, (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== "string" || currentPassword.length < 1 || currentPassword.length > 500) {
+    return res.status(400).json({ error: "Mot de passe actuel requis." });
+  }
+  const key = "user:" + req.user.id;
+  const wait = passwordCheckLimiter.blockedFor(key);
+  if (wait) return tooManyAttempts(res, wait);
+
+  const fullUser = store.getUser(req.user.id);
+  // 403 et non 401 : le client interprète 401 comme « session expirée »
+  if (!fullUser || !auth.verifyPassword(currentPassword, fullUser.passwordHash)) {
+    passwordCheckLimiter.hit(key);
+    return res.status(403).json({ error: "Mot de passe actuel incorrect." });
+  }
+  passwordCheckLimiter.reset(key);
+  const pwError = auth.checkNewPassword(newPassword);
+  if (pwError) return res.status(400).json({ error: pwError });
+  if (newPassword === currentPassword) {
+    return res.status(400).json({ error: "Le nouveau mot de passe doit être différent de l'actuel." });
+  }
+  store.updateUserPassword(req.user.id, auth.hashPassword(newPassword));
+  // Déconnecte les autres navigateurs / appareils, garde la session courante
+  store.deleteUserSessions(req.user.id, req.user.token);
+  closeUserSockets(req.user.id, req.user.token);
+  res.json({ ok: true });
 });
 
 app.post("/api/logout", auth.requireAuth, (req, res) => {
@@ -437,10 +548,17 @@ app.post("/api/lock-batch", auth.requireRole("commission"), (req, res) => {
   if (typeof password !== "string" || password.length < 1 || password.length > 500) {
     return res.status(400).json({ error: "Mot de passe requis." });
   }
+  const key = "user:" + req.user.id;
+  const wait = passwordCheckLimiter.blockedFor(key);
+  if (wait) return tooManyAttempts(res, wait);
   const fullUser = store.getUser(req.user.id);
+  // 403 et non 401 : le client interprète 401 comme « session expirée »
+  // et renverrait le juré à l'écran de connexion
   if (!fullUser || !auth.verifyPassword(password, fullUser.passwordHash)) {
-    return res.status(401).json({ error: "Mot de passe incorrect." });
+    passwordCheckLimiter.hit(key);
+    return res.status(403).json({ error: "Mot de passe incorrect." });
   }
+  passwordCheckLimiter.reset(key);
   const candidates = store.listCandidatesForCommission(req.user.id);
   const lockedAt = new Date().toISOString();
   let locked = 0;
@@ -464,23 +582,30 @@ app.post("/api/users", auth.requireRole("admin"), (req, res) => {
   const password = (req.body || {}).password;
   const displayName = optStrField((req.body || {}).displayName, 100);
   const role = (req.body || {}).role;
-  if (!username || typeof password !== "string" || password.length < 1 || password.length > 500 || displayName === null) {
+  if (!username || typeof password !== "string" || displayName === null) {
     return res.status(400).json({ error: "Identifiant et mot de passe requis." });
   }
+  const pwError = auth.checkNewPassword(password);
+  if (pwError) return res.status(400).json({ error: pwError });
   if (!["admin", "teacher", "commission"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
-  if (store.getUserByName(username)) return res.status(400).json({ error: "Cet identifiant existe déjà." });
+  if (store.getUserByNameNoCase(username)) return res.status(400).json({ error: "Cet identifiant existe déjà." });
   const u = store.addUser(username, auth.hashPassword(password), displayName, role);
   res.json(publicUser(u));
 });
 
+// Réinitialisation par l'admin (mot de passe oublié) : mot de passe provisoire,
+// toutes les sessions du compte sont fermées
 app.post("/api/users/:id/password", auth.requireRole("admin"), (req, res) => {
   const id = intId(req.params.id);
   const password = (req.body || {}).password;
-  if (typeof password !== "string" || password.length < 1 || password.length > 500) {
-    return res.status(400).json({ error: "Mot de passe requis." });
-  }
+  const pwError = auth.checkNewPassword(password);
+  if (pwError) return res.status(400).json({ error: pwError });
   if (!id || !store.getUser(id)) return res.status(404).json({ error: "Utilisateur introuvable." });
   store.updateUserPassword(id, auth.hashPassword(password));
+  // L'admin qui réinitialise son propre compte garde sa session courante
+  const keep = id === req.user.id ? req.user.token : undefined;
+  store.deleteUserSessions(id, keep);
+  closeUserSockets(id, keep);
   res.json({ ok: true });
 });
 
@@ -493,7 +618,8 @@ app.delete("/api/users/:id", auth.requireRole("admin"), (req, res) => {
     return res.status(400).json({ error: "Impossible de supprimer le dernier administrateur." });
   }
   if (id === req.user.id) return res.status(400).json({ error: "Vous ne pouvez pas supprimer votre propre compte." });
-  store.deleteUser(id);
+  store.deleteUser(id); // CASCADE : sessions, appartenances aux commissions/classes
+  closeUserSockets(id);
   res.json({ ok: true });
 });
 
@@ -785,6 +911,18 @@ function broadcastAll(payload) {
   const data = JSON.stringify(payload);
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(data);
+  }
+}
+
+/* Ferme les WebSocket d'un utilisateur dont les sessions ont été révoquées
+   (changement / réinitialisation de mot de passe, suppression du compte),
+   sauf celle de la session exceptToken. Sans cela, une connexion déjà
+   ouverte continuerait à pouvoir écrire malgré la révocation. */
+function closeUserSockets(userId, exceptToken) {
+  for (const client of wss.clients) {
+    if (client.user && client.user.id === userId && client.user.token !== exceptToken) {
+      try { client.close(4001, "Session fermée"); } catch {}
+    }
   }
 }
 
