@@ -17,6 +17,9 @@ const ROLE_LABELS = {
   commission: "Commission",
 };
 
+// Longueur minimale d'un nouveau mot de passe (identique à auth.js)
+const PASSWORD_MIN = 8;
+
 // État global
 let me = null;             // { user, allowedSheets }
 let HIERARCHIES = {};      // { sheetKey: sections }
@@ -67,6 +70,54 @@ function toast(msg, kind) {
   t.className = "show" + (kind ? " " + kind : "");
   clearTimeout(toast._t);
   toast._t = setTimeout(() => (t.className = ""), 3200);
+}
+
+/* Saisie d'un mot de passe dans une fenêtre modale (champ masqué).
+   Remplace prompt(), qui affiche le mot de passe en clair à l'écran.
+   Résout avec le mot de passe saisi, ou null si annulé. */
+function askPassword({ title, message = "", label = "Mot de passe", withConfirm = false,
+                       minLength = 1, okLabel = "Valider" }) {
+  return new Promise((resolve) => {
+    const dlg = $("#pw-dialog");
+    const input = $("#pw-dialog-input");
+    const confirmInput = $("#pw-dialog-confirm");
+    const err = $("#pw-dialog-error");
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      input.value = confirmInput.value = "";
+      if (dlg.open) dlg.close();
+      resolve(value);
+    };
+
+    $("#pw-dialog-title").textContent = title;
+    $("#pw-dialog-msg").textContent = message;
+    $("#pw-dialog-label").textContent = label;
+    $("#pw-dialog-ok").textContent = okLabel;
+    $("#pw-dialog-confirm-wrap").classList.toggle("hidden", !withConfirm);
+    input.autocomplete = withConfirm ? "new-password" : "current-password";
+    input.value = confirmInput.value = "";
+    err.textContent = "";
+
+    $("#pw-dialog-form").onsubmit = (e) => {
+      e.preventDefault();
+      const v = input.value;
+      if (v.length < minLength) {
+        err.textContent = minLength > 1 ? `Au moins ${minLength} caractères.` : "Mot de passe requis.";
+        return;
+      }
+      if (withConfirm && v !== confirmInput.value) {
+        err.textContent = "Les deux mots de passe ne correspondent pas.";
+        return;
+      }
+      finish(v);
+    };
+    $("#pw-dialog-cancel").onclick = () => finish(null);
+    dlg.onclose = () => finish(null); // Échap
+    dlg.showModal();
+    input.focus();
+  });
 }
 
 async function api(url, opts) {
@@ -793,7 +844,11 @@ async function lockCurrentSheet() {
 /* Verrouillage du lot (commission) : double confirmation + mot de passe */
 async function lockBatch() {
   if (!confirm("Êtes-vous vraiment sûr ?\n\nVous allez verrouiller TOUTES vos soutenances. Vous ne pourrez plus les éditer ensuite.")) return;
-  const password = prompt("Confirmez avec le mot de passe de votre compte :");
+  const password = await askPassword({
+    title: "Verrouiller le lot",
+    message: "Confirmez avec le mot de passe de votre compte.",
+    okLabel: "Verrouiller",
+  });
   if (!password) return;
   try {
     const res = await api("/api/lock-batch", {
@@ -874,14 +929,23 @@ async function loadUsers() {
   box.innerHTML = "";
   for (const u of users) {
     const row = el("div", "admin-row");
+    // Nom et identifiant : saisis par les utilisateurs eux-mêmes (inscription)
+    // -> toujours insérés en TEXTE (textContent), jamais en HTML (anti-XSS)
     const grow = el("div", "grow");
-    grow.innerHTML = `<strong>${u.displayName || u.username}</strong>
-      <span class="sub">(${u.username})</span>`;
+    const strong = el("strong"); strong.textContent = u.displayName || u.username;
+    const sub = el("span", "sub"); sub.textContent = ` (${u.username})`;
+    grow.append(strong, sub);
     const role = el("span", "role-tag"); role.textContent = ROLE_LABELS[u.role];
 
     const bPass = el("button", "btn btn-outline btn-sm"); bPass.textContent = "Mot de passe";
     bPass.onclick = async () => {
-      const p = prompt(`Nouveau mot de passe pour ${u.username} :`);
+      const p = await askPassword({
+        title: "Réinitialiser le mot de passe",
+        message: `Nouveau mot de passe provisoire pour ${u.username}. L'utilisateur pourra le changer depuis « Mon compte ».`,
+        label: "Nouveau mot de passe",
+        withConfirm: true,
+        minLength: PASSWORD_MIN,
+      });
       if (!p) return;
       try {
         await api(`/api/users/${u.id}/password`, {

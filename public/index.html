@@ -189,6 +189,7 @@
   <!-- Utilisateurs -->
   <div class="card admin-card">
     <h3>👤 Comptes utilisateurs</h3>
+    <p class="admin-hint">Le mot de passe saisi ici est <strong>provisoire</strong> : chaque utilisateur peut ensuite le changer lui-même depuis « Mon compte », pour que vous ne le connaissiez plus.</p>
     <form id="user-form" class="inline-form">
       <div class="field">
         <label for="u-username">Identifiant *</label>
@@ -199,8 +200,8 @@
         <input id="u-display" type="text" autocomplete="off" />
       </div>
       <div class="field">
-        <label for="u-password">Mot de passe *</label>
-        <input id="u-password" type="text" required autocomplete="off" />
+        <label for="u-password">Mot de passe provisoire * <span class="sub">(8 car. min.)</span></label>
+        <input id="u-password" type="password" required minlength="8" autocomplete="new-password" />
       </div>
       <div class="field">
         <label for="u-role">Rôle *</label>
@@ -250,6 +251,27 @@
     <button class="btn btn-danger" id="btn-purge">Archiver et supprimer tous les candidats</button>
   </div>
 </div>
+
+<!-- ════════════ Saisie de mot de passe (champ masqué) ════════════ -->
+<dialog id="pw-dialog" class="pw-dialog">
+  <form id="pw-dialog-form">
+    <h3 id="pw-dialog-title"></h3>
+    <p id="pw-dialog-msg" class="dialog-msg"></p>
+    <div class="field">
+      <label for="pw-dialog-input" id="pw-dialog-label">Mot de passe</label>
+      <input id="pw-dialog-input" type="password" autocomplete="current-password" />
+    </div>
+    <div class="field" id="pw-dialog-confirm-wrap">
+      <label for="pw-dialog-confirm">Confirmation</label>
+      <input id="pw-dialog-confirm" type="password" autocomplete="new-password" />
+    </div>
+    <div id="pw-dialog-error" class="form-error"></div>
+    <div class="dialog-actions">
+      <button class="btn btn-outline" type="button" id="pw-dialog-cancel">Annuler</button>
+      <button class="btn btn-primary" type="submit" id="pw-dialog-ok">Valider</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast"></div>
 <input type="file" id="excel-input" accept=".xlsx" class="hidden" />
