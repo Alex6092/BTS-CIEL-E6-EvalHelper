@@ -7,92 +7,19 @@
    ════════════════════════════════════════════════════════════════ */
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
-const net = require("node:net");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const WebSocket = require("ws");
+const h = require("./helpers");
 
-let base, wsBase, server, tmpDir;
-let admin;                  // client connecté en admin
+let srv;                      // serveur de test
+let admin;                    // client connecté en admin
 const createdCandidates = []; // supprimés à la fin (fichiers Excel dans uploads/)
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-/* Client HTTP minimal avec cookie de session */
-function client() {
-  let cookie = "";
-  const call = async (method, url, body) => {
-    const headers = {};
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (cookie) headers.Cookie = cookie;
-    const res = await fetch(base + url, {
-      method, headers, body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    const setCookie = res.headers.get("set-cookie");
-    if (setCookie) cookie = setCookie.split(";")[0];
-    const data = await res.json().catch(() => ({}));
-    return { status: res.status, data, headers: res.headers };
-  };
-  call.cookie = () => cookie;
-  return call;
-}
-
-async function login(username, password) {
-  const c = client();
-  const r = await c("POST", "/api/login", { username, password });
-  assert.equal(r.status, 200, `connexion de ${username} : ${JSON.stringify(r.data)}`);
-  return c;
-}
-
-/* Ouvre un WebSocket avec le cookie du client */
-function openSocket(c) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsBase, { headers: { Cookie: c.cookie() } });
-    ws.once("open", () => resolve(ws));
-    ws.once("error", reject);
-  });
-}
-
-/* Prochain message reçu, ou null après `ms` millisecondes */
-function nextMessage(ws, ms = 500) {
-  return new Promise((resolve) => {
-    const t = setTimeout(() => { ws.off("message", onMsg); resolve(null); }, ms);
-    function onMsg(raw) { clearTimeout(t); resolve(JSON.parse(raw)); }
-    ws.once("message", onMsg);
-  });
-}
+const client = () => h.client(srv.base);
+const login = (u, p) => h.login(srv.base, u, p);
+const openSocket = (c) => h.openSocket(srv.wsBase, c);
+const nextMessage = h.nextMessage;
 
 before(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "e6-test-"));
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  wsBase = `ws://127.0.0.1:${port}`;
-  server = spawn(process.execPath, [path.join(__dirname, "..", "server.js")], {
-    env: { ...process.env, PORT: String(port), DB_FILE: path.join(tmpDir, "test.db") },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  await new Promise((resolve, reject) => {
-    let out = "";
-    const timer = setTimeout(() => reject(new Error("Le serveur n'a pas démarré :\n" + out)), 10000);
-    const onData = (d) => {
-      out += d;
-      if (out.includes("démarré")) { clearTimeout(timer); resolve(); }
-    };
-    server.stdout.on("data", onData);
-    server.stderr.on("data", onData);
-    server.once("exit", (code) => { clearTimeout(timer); reject(new Error(`Serveur arrêté (code ${code}) :\n${out}`)); });
-  });
+  srv = await h.startServer();
   admin = await login("admin", "admin"); // compte créé au premier lancement
 });
 
@@ -100,14 +27,7 @@ after(async () => {
   try {
     for (const id of createdCandidates) await admin("DELETE", `/api/candidates/${id}`);
   } finally {
-    // Attendre l'arrêt effectif du serveur : sous Windows, la base SQLite reste
-    // verrouillée tant que le processus tourne (rmSync -> EPERM)
-    if (server && server.exitCode === null && server.signalCode === null) {
-      const exited = new Promise(resolve => server.once("exit", resolve));
-      server.kill();
-      await exited;
-    }
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    if (srv) await srv.stop();
   }
 });
 

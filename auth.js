@@ -51,19 +51,27 @@ function createSession(userId) {
   return token;
 }
 
+/* Lecture des cookies : l'en-tête Cookie est contrôlé par le client (et
+   partagé avec les autres applications du même hôte). Une valeur mal encodée
+   est ignorée : decodeURIComponent lève une exception qui, non rattrapée,
+   faisait planter le serveur (connexion WebSocket) ou renvoyait 400. */
 function parseCookies(header) {
   const out = {};
   for (const part of String(header || "").split(";")) {
     const i = part.indexOf("=");
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    const name = part.slice(0, i).trim();
+    try { out[name] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* ignorée */ }
   }
   return out;
 }
 
+const TOKEN_RE = /^[0-9a-f]{64}$/; // jeton de session : 32 octets en hexadécimal
+
 // Récupère l'utilisateur de session depuis une requête (Express ou WS upgrade)
 function userFromRequest(req) {
   const token = parseCookies(req.headers.cookie)[COOKIE_NAME];
-  if (!token) return null;
+  if (!token || !TOKEN_RE.test(token)) return null;
   const s = store.getSession(token);
   if (!s) return null;
   return { id: s.userId, username: s.username, displayName: s.displayName, role: s.role, token };

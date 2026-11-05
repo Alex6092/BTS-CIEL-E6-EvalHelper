@@ -6,6 +6,7 @@ const express = require("express");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const multer = require("multer");
 const { WebSocketServer } = require("ws");
 
@@ -67,15 +68,50 @@ app.disable("x-powered-by");
 // X-Forwarded-For. L'en-tête n'est pris en compte que si la connexion vient
 // de la machine elle-même : un client distant ne peut pas falsifier son IP.
 app.set("trust proxy", "loopback");
+
+/* ── Requêtes venant d'un autre site (CSRF, WebSocket détourné) ──
+   Le cookie SameSite=Lax ne protège pas contre une page hébergée sur le
+   même « site » (autre port de la même machine, sous-domaine voisin).
+   On refuse donc toute requête d'écriture et toute connexion WebSocket qui
+   ne provient pas de l'application elle-même :
+   - navigateurs récents : en-tête Sec-Fetch-Site (seuls « same-origin » et
+     « none », saisie directe, sont acceptés) ;
+   - sinon : l'en-tête Origin doit correspondre à l'hôte demandé (ou à
+     PUBLIC_ORIGIN si défini, ex. derrière un proxy qui modifie Host).
+   Sans aucun de ces en-têtes (client non navigateur), il n'y a pas
+   d'attaque inter-sites possible : la requête est acceptée. */
+const PUBLIC_ORIGINS = String(process.env.PUBLIC_ORIGIN || "")
+  .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
+
+function fromOtherSite(req) {
+  const site = req.headers["sec-fetch-site"];
+  if (site) return site !== "same-origin" && site !== "none";
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  if (PUBLIC_ORIGINS.length) return !PUBLIC_ORIGINS.includes(origin);
+  try { return new URL(origin).host !== String(req.headers.host || ""); }
+  catch { return true; } // Origin « null » ou invalide
+}
+
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+app.use((req, res, next) => {
+  if (UNSAFE_METHODS.has(req.method) && fromOtherSite(req)) {
+    return res.status(403).json({ error: "Requête refusée : origine non autorisée." });
+  }
+  next();
+});
+
 app.use(express.json({ limit: "200kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname) || ".xlsx";
-      cb(null, `candidate_${req.params.id}_${Date.now()}${ext}`);
+    // Nom entièrement choisi par le serveur : ni l'URL (:id, décodée par
+    // Express, peut contenir « ../ ») ni le nom d'origine n'entrent dans le chemin
+    filename: (req, _file, cb) => {
+      const id = intId(req.params.id) || 0;
+      cb(null, `candidate_${id}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.xlsx`);
     },
   }),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
@@ -263,6 +299,7 @@ app.post("/api/me/password", auth.requireAuth, (req, res) => {
 
 app.post("/api/logout", auth.requireAuth, (req, res) => {
   store.deleteSession(req.user.token);
+  closeSessionSockets(req.user.token); // les WebSocket de cette session aussi
   res.setHeader("Set-Cookie", `${auth.COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`);
   res.json({ ok: true });
 });
@@ -316,9 +353,10 @@ app.get("/api/candidates", auth.requireAuth, (req, res) => {
     for (const key of SHEET_ORDER) {
       pub.locks[key] = !!locks[key];
       const d = dataBySheet[key];
-      pub.overrides[key] = isValidOverride(d.noteOverride);
-      // La soutenance n'est visible qu'une fois verrouillée par la commission
+      // La soutenance n'est visible qu'une fois verrouillée par la commission :
+      // ni sa note, ni même le fait qu'une note définitive ait été saisie
       const visible = key !== "SO" || soLocked;
+      pub.overrides[key] = visible && isValidOverride(d.noteOverride);
       pub.notes[key] = visible ? proposedNote(key, d.evaluation, d.bonus, d.noteOverride) : null;
     }
     // Note finale : seulement si la soutenance est communiquée (verrouillée)
@@ -537,7 +575,7 @@ app.post("/api/lock", auth.requireAuth, (req, res) => {
   }
   const lockedAt = new Date().toISOString();
   store.lock(candidateId, sheet, lockedAt, req.user.id);
-  broadcastAll({ type: "lockchanged", candidateId, sheet });
+  broadcastLockChanged(candidateId, sheet);
   res.json({ ok: true, lockedAt });
 });
 
@@ -565,7 +603,7 @@ app.post("/api/lock-batch", auth.requireRole("commission"), (req, res) => {
   for (const c of candidates) {
     if (store.lock(c.id, "SO", lockedAt, req.user.id)) {
       locked++;
-      broadcastAll({ type: "lockchanged", candidateId: c.id, sheet: "SO" });
+      broadcastLockChanged(c.id, "SO");
     }
   }
   res.json({ ok: true, locked, total: candidates.length });
@@ -745,8 +783,23 @@ app.delete("/api/classes/:id/candidates/:candidateId", auth.requireRole("admin")
 });
 
 /* ════════════════ Purge annuelle (admin) ════════════════
-   Archive la base puis supprime tous les candidats et leurs fichiers. */
+   Archive la base puis supprime tous les candidats et leurs fichiers.
+   Action destructrice : le mot de passe de l'admin est exigé (une requête
+   forgée par une autre page ne peut pas le fournir). */
 app.post("/api/purge", auth.requireRole("admin"), (req, res) => {
+  const password = (req.body || {}).password;
+  if (typeof password !== "string" || password.length < 1 || password.length > 500) {
+    return res.status(400).json({ error: "Mot de passe requis." });
+  }
+  const key = "user:" + req.user.id;
+  const wait = passwordCheckLimiter.blockedFor(key);
+  if (wait) return tooManyAttempts(res, wait);
+  const fullUser = store.getUser(req.user.id);
+  if (!fullUser || !auth.verifyPassword(password, fullUser.passwordHash)) {
+    passwordCheckLimiter.hit(key);
+    return res.status(403).json({ error: "Mot de passe incorrect." });
+  }
+  passwordCheckLimiter.reset(key);
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const archivePath = path.join(DATA_DIR, `archive-${stamp}.db`);
@@ -796,15 +849,52 @@ app.use((err, _req, res, _next) => {
 
 /* ════════════════ WebSocket (synchro temps réel) ════════════════ */
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+
+/* Limites WebSocket :
+   - message de 64 Ko maximum (au lieu de 100 Mo par défaut) : un commentaire
+     fait au plus 5000 caractères ;
+   - 20 connexions simultanées par utilisateur (plusieurs onglets) ;
+   - 300 messages par tranche de 10 s et par connexion (cocher un critère
+     parent envoie un message par sous-critère). */
+const WS_MAX_PAYLOAD = 64 * 1024;
+const WS_MAX_SOCKETS_PER_USER = 20;
+const WS_MAX_MESSAGES = 300;
+const WS_MESSAGE_WINDOW_MS = 10 * 1000;
+
+const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
+
+/* Ouverture d'une connexion WebSocket : origine contrôlée AVANT la poignée
+   de main. Toute erreur est contenue : une requête malformée ne doit jamais
+   faire tomber le serveur. */
+server.on("upgrade", (req, socket, head) => {
+  socket.on("error", () => {});
+  try {
+    if (fromOtherSite(req)) {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  } catch {
+    socket.destroy();
+  }
+});
 
 function roomKey(candidateId, sheet) { return candidateId + ":" + sheet; }
 
 wss.on("connection", (ws, req) => {
-  const user = auth.userFromRequest(req);
+  // Trame invalide, message trop gros… : `ws` émet « error » puis ferme la
+  // connexion. Sans écouteur, cet événement arrêtait tout le processus.
+  ws.on("error", () => {});
+  let user = null;
+  try { user = auth.userFromRequest(req); } catch {}
   if (!user) { ws.close(4001, "Authentification requise"); return; }
+  let count = 0;
+  for (const c of wss.clients) if (c.user && c.user.id === user.id) count++;
+  if (count >= WS_MAX_SOCKETS_PER_USER) { ws.close(1008, "Trop de connexions"); return; }
   ws.user = user;
   ws.room = null;
+  ws.msgWindowStart = Date.now();
+  ws.msgCount = 0;
 
   ws.on("message", (raw) => {
     // Aucune donnée WS n'est digne de confiance : tout est validé, et
@@ -814,9 +904,22 @@ wss.on("connection", (ws, req) => {
   });
 });
 
+/* La session est-elle toujours valide (non déconnectée, non expirée, compte
+   existant) ? Revérifié à chaque message : une connexion ouverte ne garde
+   pas ses droits au-delà de sa session. */
+function wsSessionValid(ws) {
+  if (store.getSession(ws.user.token)) return true;
+  try { ws.close(4001, "Session expirée"); } catch {}
+  return false;
+}
+
 function handleWsMessage(ws, raw) {
     if (typeof raw !== "string" && !Buffer.isBuffer(raw)) return;
+    const now = Date.now();
+    if (now - ws.msgWindowStart > WS_MESSAGE_WINDOW_MS) { ws.msgWindowStart = now; ws.msgCount = 0; }
+    if (++ws.msgCount > WS_MAX_MESSAGES) { ws.close(1008, "Trop de messages"); return; }
     if (raw.length > 20000) return;
+    if (!wsSessionValid(ws)) return;
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== "object") return;
@@ -869,7 +972,9 @@ function handleWsMessage(ws, raw) {
       if (!ws.room) return;
       if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
       if (typeof msg.text !== "string") return;
-      const text = msg.text.slice(0, 5000);
+      // Caractères de contrôle retirés (sauf tabulation et retours à la ligne) :
+      // interdits dans le XML du classeur Excel, ils le rendraient illisible
+      const text = msg.text.slice(0, 5000).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
       store.setComment(ws.candidateId, ws.sheet, text);
       // Diffuser aux AUTRES clients de la salle (pas l'émetteur, qui tape)
       broadcastRoom(ws.room, { type: "comment", text }, ws);
@@ -901,16 +1006,37 @@ function handleWsMessage(ws, raw) {
     }
 }
 
+/* Diffusion aux autres membres d'une salle (candidat + onglet).
+   Les droits de CHAQUE destinataire sont revérifiés : un juré retiré de sa
+   commission, un enseignant retiré de sa classe ou une session fermée ne
+   doivent plus recevoir les saisies en direct. */
 function broadcastRoom(room, payload, except) {
   const data = JSON.stringify(payload);
   for (const client of wss.clients) {
-    if (client.readyState === 1 && client.room === room && client !== except) client.send(data);
+    if (client.readyState !== 1 || client.room !== room || client === except) continue;
+    if (!wsSessionValid(client)) continue;
+    if (!canViewSheet(client.user, client.candidateId, client.sheet)) {
+      client.room = null;
+      client.send(JSON.stringify({ type: "revoked" }));
+      continue;
+    }
+    client.send(data);
   }
 }
+// Message sans donnée (« la liste a changé, rechargez-la ») : à tous
 function broadcastAll(payload) {
   const data = JSON.stringify(payload);
   for (const client of wss.clients) {
     if (client.readyState === 1) client.send(data);
+  }
+}
+// Verrouillage : seulement aux utilisateurs qui ont accès à ce candidat
+function broadcastLockChanged(candidateId, sheet) {
+  const data = JSON.stringify({ type: "lockchanged", candidateId, sheet });
+  for (const client of wss.clients) {
+    if (client.readyState === 1 && client.user && auth.canAccessCandidate(client.user, candidateId)) {
+      client.send(data);
+    }
   }
 }
 
@@ -925,14 +1051,22 @@ function closeUserSockets(userId, exceptToken) {
     }
   }
 }
+// Ferme les WebSocket d'une session précise (déconnexion)
+function closeSessionSockets(token) {
+  for (const client of wss.clients) {
+    if (client.user && client.user.token === token) {
+      try { client.close(4001, "Session fermée"); } catch {}
+    }
+  }
+}
 
 /* ════════════════ Démarrage ════════════════ */
 store.purgeSessions();
 const created = auth.ensureDefaultAdmin();
 
 // Erreurs d'écoute (port privilégié, port déjà pris…) : message clair au lieu
-// d'une pile d'erreur. `ws` relaie les erreurs du serveur HTTP sur `wss`.
-wss.on("error", (err) => {
+// d'une pile d'erreur.
+server.on("error", (err) => {
   if (err.code === "EACCES") {
     console.error(`\n  ✖ Permission refusée pour écouter sur le port ${PORT}.`);
     console.error(`    Sous Linux, les ports < 1024 sont réservés à root.`);

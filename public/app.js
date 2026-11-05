@@ -292,6 +292,14 @@ function connectWS() {
       if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
     } else if (msg.type === "candidates") {
       if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
+    } else if (msg.type === "revoked") {
+      // Accès retiré pendant la saisie (commission ou classe modifiée par l'admin)
+      if (!$("#screen-grading").classList.contains("hidden")) {
+        current = { candidate: null, sheet: null };
+        show("screen-candidates");
+        loadCandidates();
+        toast("Votre accès à ce candidat a été retiré par l'administrateur.", "error");
+      }
     }
   };
 }
@@ -1332,9 +1340,17 @@ async function loadClasses() {
 /* ── Purge annuelle ── */
 async function doPurge() {
   if (!confirm("ARCHIVER puis SUPPRIMER tous les candidats et leurs évaluations ?\n\nUne copie de sauvegarde de la base sera créée. Les comptes, classes et commissions seront conservés.\n\nCette action est irréversible.")) return;
-  if (!confirm("Dernière confirmation : supprimer définitivement tous les candidats ?")) return;
+  const password = await askPassword({
+    title: "Purge de début d'année",
+    message: "Dernière confirmation : saisissez votre mot de passe pour supprimer définitivement tous les candidats.",
+    okLabel: "Archiver et supprimer",
+  });
+  if (!password) return;
   try {
-    const r = await api("/api/purge", { method: "POST" });
+    const r = await api("/api/purge", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
     toast(`Purge effectuée : ${r.removed} candidat(s) supprimé(s). Archive : ${r.archived}`, "success");
     loadClasses(); loadCommissions();
   } catch (e) { toast(e.message, "error"); }

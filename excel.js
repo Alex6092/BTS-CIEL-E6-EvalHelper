@@ -13,6 +13,7 @@
 const JSZip = require("jszip");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES, RECAP_CONFIG,
   computeLevel, proposedNote, computeFinalNote, BONUS_CELL, NOTE_CELL,
@@ -24,8 +25,16 @@ if (!fs.existsSync(EXPORT_DIR)) fs.mkdirSync(EXPORT_DIR, { recursive: true });
 const LEVEL_COLS = ["C", "D", "E", "F"];
 
 // ── Helpers XML ──
+// Retire les caractères interdits en XML 1.0 (caractères de contrôle,
+// U+FFFE/U+FFFF, demi-paires UTF-16 isolées) : un seul suffit à rendre le
+// classeur illisible par Excel. Puis échappe & < >.
+const XML_INVALID = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const escXml = (s) => String(s)
+  .replace(XML_INVALID, "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Suffixe aléatoire : deux exports dans la même seconde ne peuvent ni
+// s'écraser ni être devinés
+const randomSuffix = () => crypto.randomBytes(6).toString("hex");
 const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const colIndex = (addr) => {
   const c = addr.match(/[A-Z]+/)[0];
@@ -172,7 +181,7 @@ async function finalizeZip(zip) {
 function saveExport(buf, candidate, suffix) {
   const safe = (s) => String(s || "").replace(/[^a-z0-9_-]/gi, "_");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const fileName = `E6_${safe(candidate.nom)}_${safe(candidate.prenom)}_${suffix}_${stamp}.xlsx`;
+  const fileName = `E6_${safe(candidate.nom)}_${safe(candidate.prenom)}_${suffix}_${stamp}_${randomSuffix()}.xlsx`;
   const filePath = path.join(EXPORT_DIR, fileName);
   fs.writeFileSync(filePath, buf);
   return { filePath, fileName };
@@ -272,7 +281,7 @@ async function exportAll(entries, settings) {
     type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 },
   });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const fileName = `E6_Exports_${stamp}.zip`;
+  const fileName = `E6_Exports_${stamp}_${randomSuffix()}.zip`;
   const filePath = path.join(EXPORT_DIR, fileName);
   fs.writeFileSync(filePath, zipBuf);
   return { filePath, fileName, count: entries.length };
