@@ -27,6 +27,9 @@ const {
 } = require("./hierarchy");
 
 const PORT = process.env.PORT || 3000;
+// Adresse d'écoute : 127.0.0.1 derrière nginx (l'application n'est alors
+// joignable que par nginx, donc en HTTPS) ; par défaut, toutes les interfaces.
+const HOST = process.env.HOST || undefined;
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DATA_DIR = path.join(__dirname, "data");
 const EXPORT_DIR = path.join(__dirname, "exports");
@@ -1209,14 +1212,18 @@ server.on("error", (err) => {
 });
 
 function listen(created, legacyAdmin) {
-  server.listen(PORT, () => {
+  server.listen(PORT, HOST, () => {
     console.log(`\n  ✅ Serveur d'évaluation E6 démarré`);
-    console.log(`  ➜  Local   : http://localhost:${PORT}`);
-    const nets = require("os").networkInterfaces();
-    for (const name of Object.keys(nets)) {
-      for (const net of nets[name]) {
-        if (net.family === "IPv4" && !net.internal)
-          console.log(`  ➜  Réseau  : http://${net.address}:${PORT}`);
+    if (HOST && HOST !== "0.0.0.0" && HOST !== "::") {
+      console.log(`  ➜  Écoute  : http://${HOST.includes(":") ? `[${HOST}]` : HOST}:${PORT} (seulement cette adresse)`);
+    } else {
+      console.log(`  ➜  Local   : http://localhost:${PORT}`);
+      const nets = require("os").networkInterfaces();
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+          if (net.family === "IPv4" && !net.internal)
+            console.log(`  ➜  Réseau  : http://${net.address}:${PORT}`);
+        }
       }
     }
     if (created) {
