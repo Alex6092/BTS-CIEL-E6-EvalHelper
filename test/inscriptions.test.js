@@ -100,8 +100,14 @@ after(async () => {
   try {
     for (const id of createdCandidates) await admin("DELETE", `/api/candidates/${id}`);
   } finally {
-    if (server) server.kill();
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    // Attendre l'arrêt effectif du serveur : sous Windows, la base SQLite reste
+    // verrouillée tant que le processus tourne (rmSync -> EPERM)
+    if (server && server.exitCode === null && server.signalCode === null) {
+      const exited = new Promise(resolve => server.once("exit", resolve));
+      server.kill();
+      await exited;
+    }
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
 
