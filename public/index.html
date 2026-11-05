@@ -14,6 +14,7 @@
 <div id="userbar" class="hidden">
   <span id="ub-name"></span>
   <span id="ub-role" class="role-tag"></span>
+  <button class="btn btn-outline btn-sm" id="btn-account">👤 Mon compte</button>
   <button class="btn btn-outline btn-sm hidden" id="btn-admin">⚙ Administration</button>
   <button class="btn btn-outline btn-sm" id="btn-logout">Déconnexion</button>
 </div>
@@ -38,6 +39,79 @@
       </div>
       <button class="btn btn-primary" type="submit">Se connecter</button>
       <div id="login-error" class="form-error"></div>
+    </form>
+    <p id="register-link-wrap" class="login-alt hidden">
+      Membre d'une commission sans compte ?
+      <a href="#" id="link-register">Créer un compte</a>
+    </p>
+  </div>
+</div>
+
+<!-- ════════════ ÉCRAN INSCRIPTION (membres de commission) ════════════ -->
+<div id="screen-register" class="hidden">
+  <div class="card login-card">
+    <h2>Créer un compte — membre de commission</h2>
+    <p class="form-hint">Réservé aux membres des commissions d'évaluation (jurys de soutenance).
+      Une fois votre compte créé, l'administrateur doit vous associer à une commission :
+      vos candidats apparaîtront alors à votre prochaine visite.</p>
+    <form id="register-form">
+      <div class="field">
+        <label for="reg-username">Identifiant *</label>
+        <input id="reg-username" type="text" autocomplete="username" required
+               minlength="3" maxlength="50" pattern="[A-Za-z0-9._\-]{3,50}" />
+        <span class="field-hint">3 à 50 caractères : lettres sans accent, chiffres, point, tiret ou tiret bas.</span>
+      </div>
+      <div class="field">
+        <label for="reg-display">Nom et prénom *</label>
+        <input id="reg-display" type="text" autocomplete="name" required maxlength="100" />
+      </div>
+      <div class="field">
+        <label for="reg-password">Mot de passe * <span class="sub">(8 car. min.)</span></label>
+        <input id="reg-password" type="password" autocomplete="new-password" required minlength="8" />
+      </div>
+      <div class="field">
+        <label for="reg-password2">Confirmation du mot de passe *</label>
+        <input id="reg-password2" type="password" autocomplete="new-password" required minlength="8" />
+      </div>
+      <button class="btn btn-primary" type="submit">Créer mon compte</button>
+      <div id="register-error" class="form-error"></div>
+    </form>
+    <p class="login-alt"><a href="#" id="link-login">← Retour à la connexion</a></p>
+  </div>
+</div>
+
+<!-- ════════════ ÉCRAN MON COMPTE ════════════ -->
+<div id="screen-account" class="hidden">
+  <div class="section-title">
+    <h2>Mon compte</h2>
+    <button class="btn btn-outline btn-sm" id="btn-account-back">← Retour</button>
+  </div>
+  <div class="card admin-card">
+    <p id="account-forced" class="forced-banner hidden">
+      🔑 Votre mot de passe est <strong>provisoire</strong> :
+      choisissez votre propre mot de passe pour accéder à l'application.
+      Personne d'autre ne le connaîtra.
+    </p>
+    <h3>🔑 Changer mon mot de passe</h3>
+    <p class="admin-hint">Identifiant : <strong id="acc-username"></strong>.
+      Après le changement, vos autres sessions ouvertes (autres navigateurs ou appareils) seront déconnectées.</p>
+    <form id="account-form" class="account-form">
+      <!-- Pour les gestionnaires de mots de passe -->
+      <input id="acc-username-field" type="text" autocomplete="username" class="hidden" tabindex="-1" aria-hidden="true" />
+      <div class="field">
+        <label for="acc-current">Mot de passe actuel *</label>
+        <input id="acc-current" type="password" autocomplete="current-password" required />
+      </div>
+      <div class="field">
+        <label for="acc-new">Nouveau mot de passe * <span class="sub">(8 car. min.)</span></label>
+        <input id="acc-new" type="password" autocomplete="new-password" required minlength="8" />
+      </div>
+      <div class="field">
+        <label for="acc-new2">Confirmation du nouveau mot de passe *</label>
+        <input id="acc-new2" type="password" autocomplete="new-password" required minlength="8" />
+      </div>
+      <button class="btn btn-success" type="submit">Changer le mot de passe</button>
+      <div id="account-error" class="form-error"></div>
     </form>
   </div>
 </div>
@@ -151,8 +225,8 @@
   </div>
 
   <div style="max-width:880px;margin:0 auto 1rem;display:flex;gap:.6rem;justify-content:flex-end">
-    <button class="btn btn-outline btn-sm" onclick="expandAll()">Tout déplier</button>
-    <button class="btn btn-outline btn-sm" onclick="collapseAll()">Tout replier</button>
+    <button class="btn btn-outline btn-sm" id="btn-expand-all">Tout déplier</button>
+    <button class="btn btn-outline btn-sm" id="btn-collapse-all">Tout replier</button>
   </div>
 
   <div id="app"></div>
@@ -186,9 +260,25 @@
     </form>
   </div>
 
+  <!-- Inscriptions des membres de commission -->
+  <div class="card admin-card">
+    <h3>📝 Inscriptions des membres de commission</h3>
+    <p class="admin-hint">Quand les inscriptions sont ouvertes, l'écran de connexion propose un lien « Créer un compte ».
+      Les comptes ainsi créés ont <strong>toujours</strong> le rôle « Membre de commission » et ne voient aucun candidat
+      tant que vous ne les avez pas associés à une commission (section « Commissions » ci-dessous).
+      Fermez les inscriptions une fois les jurés inscrits.</p>
+    <div class="registration-status">
+      <span id="reg-state" class="reg-state"></span>
+      <button class="btn btn-sm" id="btn-reg-toggle" type="button"></button>
+    </div>
+    <p class="admin-hint reg-info">Adresse à communiquer aux jurés : <strong id="reg-url"></strong></p>
+    <p class="reg-pending hidden" id="reg-pending"></p>
+  </div>
+
   <!-- Utilisateurs -->
   <div class="card admin-card">
     <h3>👤 Comptes utilisateurs</h3>
+    <p class="admin-hint">Le mot de passe saisi ici est <strong>provisoire</strong> : l'utilisateur devra le remplacer par le sien dès sa première connexion, pour que vous ne le connaissiez plus. Il en va de même après une réinitialisation (bouton « Mot de passe »).</p>
     <form id="user-form" class="inline-form">
       <div class="field">
         <label for="u-username">Identifiant *</label>
@@ -199,8 +289,8 @@
         <input id="u-display" type="text" autocomplete="off" />
       </div>
       <div class="field">
-        <label for="u-password">Mot de passe *</label>
-        <input id="u-password" type="text" required autocomplete="off" />
+        <label for="u-password">Mot de passe provisoire * <span class="sub">(8 car. min.)</span></label>
+        <input id="u-password" type="password" required minlength="8" autocomplete="new-password" />
       </div>
       <div class="field">
         <label for="u-role">Rôle *</label>
@@ -250,6 +340,27 @@
     <button class="btn btn-danger" id="btn-purge">Archiver et supprimer tous les candidats</button>
   </div>
 </div>
+
+<!-- ════════════ Saisie de mot de passe (champ masqué) ════════════ -->
+<dialog id="pw-dialog" class="pw-dialog">
+  <form id="pw-dialog-form">
+    <h3 id="pw-dialog-title"></h3>
+    <p id="pw-dialog-msg" class="dialog-msg"></p>
+    <div class="field">
+      <label for="pw-dialog-input" id="pw-dialog-label">Mot de passe</label>
+      <input id="pw-dialog-input" type="password" autocomplete="current-password" />
+    </div>
+    <div class="field" id="pw-dialog-confirm-wrap">
+      <label for="pw-dialog-confirm">Confirmation</label>
+      <input id="pw-dialog-confirm" type="password" autocomplete="new-password" />
+    </div>
+    <div id="pw-dialog-error" class="form-error"></div>
+    <div class="dialog-actions">
+      <button class="btn btn-outline" type="button" id="pw-dialog-cancel">Annuler</button>
+      <button class="btn btn-primary" type="submit" id="pw-dialog-ok">Valider</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast"></div>
 <input type="file" id="excel-input" accept=".xlsx" class="hidden" />

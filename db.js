@@ -122,6 +122,20 @@ db.exec(`
 try { db.exec("ALTER TABLE comments ADD COLUMN bonus REAL NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE comments ADD COLUMN noteOverride REAL DEFAULT NULL"); } catch {}
 try { db.exec("ALTER TABLE candidates ADD COLUMN classId INTEGER DEFAULT NULL REFERENCES classes(id) ON DELETE SET NULL"); } catch {}
+// 1 = compte créé par le formulaire d'inscription public (membre de commission)
+try { db.exec("ALTER TABLE users ADD COLUMN selfRegistered INTEGER NOT NULL DEFAULT 0"); } catch {}
+// 1 = mot de passe provisoire (créé ou réinitialisé par l'admin) : à changer
+// avant toute autre action
+try { db.exec("ALTER TABLE users ADD COLUMN mustChangePassword INTEGER NOT NULL DEFAULT 0"); } catch {}
+
+/* Sessions : la colonne `token` contient désormais l'empreinte SHA-256 du
+   jeton (le jeton lui-même n'est que dans le cookie). Les anciennes
+   sessions, enregistrées en clair, sont supprimées une seule fois
+   (les utilisateurs se reconnectent). */
+if (!db.prepare("SELECT 1 FROM settings WHERE key = 'sessionTokensHashed'").get()) {
+  db.exec("DELETE FROM sessions");
+  db.prepare("INSERT INTO settings (key, value) VALUES ('sessionTokensHashed', '1')").run();
+}
 
 const CAND_SELECT = `
   SELECT c.*, cl.name AS className
@@ -195,22 +209,32 @@ const q = {
   `),
 
   // ── Utilisateurs ──
-  listUsers:   db.prepare("SELECT id, username, displayName, role, createdAt FROM users ORDER BY username"),
+  // commissionCount : permet de repérer les membres de commission pas encore affectés
+  listUsers:   db.prepare(`
+    SELECT u.id, u.username, u.displayName, u.role, u.createdAt, u.selfRegistered,
+           (SELECT COUNT(*) FROM commission_members cm WHERE cm.userId = u.id) AS commissionCount
+    FROM users u ORDER BY u.username
+  `),
   getUser:     db.prepare("SELECT * FROM users WHERE id = ?"),
   getUserByName: db.prepare("SELECT * FROM users WHERE username = ?"),
-  addUser:     db.prepare("INSERT INTO users (username, passwordHash, displayName, role) VALUES (?, ?, ?, ?)"),
-  updateUserPassword: db.prepare("UPDATE users SET passwordHash = ? WHERE id = ?"),
+  // Contrôle d'unicité insensible à la casse (évite « Dupont » et « dupont »)
+  getUserByNameNoCase: db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE LIMIT 1"),
+  addUser:     db.prepare("INSERT INTO users (username, passwordHash, displayName, role, selfRegistered, mustChangePassword) VALUES (?, ?, ?, ?, ?, ?)"),
+  updateUserPassword: db.prepare("UPDATE users SET passwordHash = ?, mustChangePassword = ? WHERE id = ?"),
+  setMustChangePassword: db.prepare("UPDATE users SET mustChangePassword = ? WHERE id = ?"),
   deleteUser:  db.prepare("DELETE FROM users WHERE id = ?"),
   countAdmins: db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"),
 
   // ── Sessions ──
   addSession:    db.prepare("INSERT INTO sessions (token, userId, expiresAt) VALUES (?, ?, ?)"),
   getSession:    db.prepare(`
-    SELECT s.token, s.expiresAt, u.id AS userId, u.username, u.displayName, u.role
+    SELECT s.token, s.expiresAt, u.id AS userId, u.username, u.displayName, u.role, u.mustChangePassword
     FROM sessions s JOIN users u ON u.id = s.userId
     WHERE s.token = ? AND s.expiresAt > datetime('now')
   `),
   deleteSession: db.prepare("DELETE FROM sessions WHERE token = ?"),
+  deleteUserSessions:  db.prepare("DELETE FROM sessions WHERE userId = ?"),
+  deleteOtherSessions: db.prepare("DELETE FROM sessions WHERE userId = ? AND token <> ?"),
   purgeSessions: db.prepare("DELETE FROM sessions WHERE expiresAt <= datetime('now')"),
 
   // ── Commissions ──
@@ -265,6 +289,7 @@ const q = {
 
 module.exports = {
   db,
+  DB_FILE,
 
   // Candidats
   listCandidates: () => q.listCandidates.all(),
@@ -294,6 +319,15 @@ module.exports = {
     // VACUUM INTO n'accepte pas de paramètre lié : on inline un chemin
     // contrôlé par le serveur (jamais une entrée utilisateur), apostrophes échappées.
     db.exec(`VACUUM INTO '${String(destPath).replace(/'/g, "''")}'`);
+    // L'archive ne garde pas les sessions : inutiles pour une restauration,
+    // et ne doivent pas survivre dans une copie conservée longtemps
+    const archive = new Database(destPath);
+    try {
+      archive.exec("DELETE FROM sessions");
+      archive.exec("VACUUM");
+    } finally {
+      archive.close();
+    }
   },
   purgeCandidates: () => q.purgeCandidates.run().changes,
 
@@ -337,11 +371,16 @@ module.exports = {
   listUsers: () => q.listUsers.all(),
   getUser: (id) => q.getUser.get(id),
   getUserByName: (username) => q.getUserByName.get(username),
-  addUser: (username, passwordHash, displayName, role) => {
-    const info = q.addUser.run(username.trim(), passwordHash, (displayName || "").trim(), role);
+  getUserByNameNoCase: (username) => q.getUserByNameNoCase.get(username),
+  addUser: (username, passwordHash, displayName, role, { selfRegistered = false, mustChangePassword = false } = {}) => {
+    const info = q.addUser.run(username.trim(), passwordHash, (displayName || "").trim(), role,
+      selfRegistered ? 1 : 0, mustChangePassword ? 1 : 0);
     return q.getUser.get(info.lastInsertRowid);
   },
-  updateUserPassword: (id, passwordHash) => q.updateUserPassword.run(passwordHash, id),
+  // mustChangePassword : true pour un mot de passe provisoire (fixé par l'admin)
+  updateUserPassword: (id, passwordHash, mustChangePassword = false) =>
+    q.updateUserPassword.run(passwordHash, mustChangePassword ? 1 : 0, id),
+  setMustChangePassword: (id, value) => q.setMustChangePassword.run(value ? 1 : 0, id),
   deleteUser: (id) => q.deleteUser.run(id),
   countAdmins: () => q.countAdmins.get().n,
 
@@ -349,6 +388,10 @@ module.exports = {
   addSession: (token, userId, expiresAt) => q.addSession.run(token, userId, expiresAt),
   getSession: (token) => q.getSession.get(token),
   deleteSession: (token) => q.deleteSession.run(token),
+  // Ferme toutes les sessions d'un utilisateur (ou toutes sauf exceptToken)
+  deleteUserSessions: (userId, exceptToken) => exceptToken
+    ? q.deleteOtherSessions.run(userId, exceptToken)
+    : q.deleteUserSessions.run(userId),
   purgeSessions: () => q.purgeSessions.run(),
 
   // Commissions

@@ -2,15 +2,23 @@
    server.js  —  Backend Express + WebSocket + SQLite + export Excel
    Authentification par rôles : admin / teacher / commission
    ════════════════════════════════════════════════════════════════ */
+
+// Fichiers créés (base, exports, fichiers Excel, archives) lisibles et
+// modifiables par le seul compte qui exécute l'application. À faire avant
+// le chargement de db.js, qui crée la base.
+try { process.umask(0o077); } catch {}
+
 const express = require("express");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const multer = require("multer");
 const { WebSocketServer } = require("ws");
 
 const store = require("./db");
 const auth = require("./auth");
+const { createLimiter, createBackoff, clientKey, tooManyAttempts } = require("./ratelimit");
 const { exportEvaluation, exportFull, exportAll } = require("./excel");
 const {
   SHEET_CONFIG, SHEET_ORDER, HIERARCHIES,
@@ -19,6 +27,9 @@ const {
 } = require("./hierarchy");
 
 const PORT = process.env.PORT || 3000;
+// Adresse d'écoute : 127.0.0.1 derrière nginx (l'application n'est alors
+// joignable que par nginx, donc en HTTPS) ; par défaut, toutes les interfaces.
+const HOST = process.env.HOST || undefined;
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 const DATA_DIR = path.join(__dirname, "data");
 const EXPORT_DIR = path.join(__dirname, "exports");
@@ -48,17 +59,96 @@ function optStrField(v, max = 200) {
   return typeof v === "string" ? v.trim().slice(0, max) : null;
 }
 
+/* ── Limitation des tentatives ──
+   Adresses regroupées par clientKey (IPv6 : par bloc /64).
+   - connexion : échecs comptés par (adresse + identifiant) et par adresse,
+     plus une attente croissante par compte, toutes adresses confondues
+     (attaque répartie sur de nombreuses adresses)
+   - inscription : toutes les tentatives, par adresse (marge pour un groupe
+     de jurés qui s'inscrit au même moment depuis le même réseau)
+   - vérification du mot de passe d'un compte connecté (changement de mot
+     de passe, verrouillage du lot, purge) : échecs par utilisateur */
+const MIN15 = 15 * 60 * 1000;
+const loginUserLimiter = createLimiter({ windowMs: MIN15, max: 10 });
+const loginIpLimiter = createLimiter({ windowMs: MIN15, max: 50 });
+const loginAccountBackoff = createBackoff({ freeAttempts: 10, baseMs: 1000, maxMs: 5 * 60 * 1000, forgetMs: 60 * 60 * 1000 });
+const registerLimiter = createLimiter({ windowMs: MIN15, max: 30 });
+const passwordCheckLimiter = createLimiter({ windowMs: MIN15, max: 10 });
+
 const app = express();
 app.disable("x-powered-by");
+// Derrière nginx (même machine), req.ip = adresse réelle du client, lue dans
+// X-Forwarded-For, et req.secure = connexion HTTPS (X-Forwarded-Proto).
+// Ces en-têtes ne sont pris en compte que si la connexion vient de la
+// machine elle-même : un client distant ne peut pas les falsifier.
+app.set("trust proxy", "loopback");
+
+/* ── En-têtes de sécurité ──
+   - CSP : scripts, styles et connexions limités à l'application elle-même ;
+     interdiction d'afficher l'application dans un cadre (clickjacking)
+   - nosniff, Referrer-Policy, HSTS en HTTPS
+   - réponses de l'API et téléchargements jamais mis en cache (notes,
+     données personnelles sur un poste partagé) */
+const HOST_RE = /^(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+app.use((req, res, next) => {
+  const host = String(req.headers.host || "");
+  const connect = HOST_RE.test(host) ? `'self' ws://${host} wss://${host}` : "'self'";
+  res.setHeader("Content-Security-Policy",
+    `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; ` +
+    `connect-src ${connect}; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`);
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
+  if (req.secure) res.setHeader("Strict-Transport-Security", "max-age=31536000");
+  if (req.path.startsWith("/api/") || req.path.startsWith("/download/")) {
+    res.setHeader("Cache-Control", "no-store");
+  }
+  next();
+});
+
+/* ── Requêtes venant d'un autre site (CSRF, WebSocket détourné) ──
+   Le cookie SameSite=Lax ne protège pas contre une page hébergée sur le
+   même « site » (autre port de la même machine, sous-domaine voisin).
+   On refuse donc toute requête d'écriture et toute connexion WebSocket qui
+   ne provient pas de l'application elle-même :
+   - navigateurs récents : en-tête Sec-Fetch-Site (seuls « same-origin » et
+     « none », saisie directe, sont acceptés) ;
+   - sinon : l'en-tête Origin doit correspondre à l'hôte demandé (ou à
+     PUBLIC_ORIGIN si défini, ex. derrière un proxy qui modifie Host).
+   Sans aucun de ces en-têtes (client non navigateur), il n'y a pas
+   d'attaque inter-sites possible : la requête est acceptée. */
+const PUBLIC_ORIGINS = String(process.env.PUBLIC_ORIGIN || "")
+  .split(",").map(s => s.trim().replace(/\/+$/, "")).filter(Boolean);
+
+function fromOtherSite(req) {
+  const site = req.headers["sec-fetch-site"];
+  if (site) return site !== "same-origin" && site !== "none";
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  if (PUBLIC_ORIGINS.length) return !PUBLIC_ORIGINS.includes(origin);
+  try { return new URL(origin).host !== String(req.headers.host || ""); }
+  catch { return true; } // Origin « null » ou invalide
+}
+
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+app.use((req, res, next) => {
+  if (UNSAFE_METHODS.has(req.method) && fromOtherSite(req)) {
+    return res.status(403).json({ error: "Requête refusée : origine non autorisée." });
+  }
+  next();
+});
+
 app.use(express.json({ limit: "200kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname) || ".xlsx";
-      cb(null, `candidate_${req.params.id}_${Date.now()}${ext}`);
+    // Nom entièrement choisi par le serveur : ni l'URL (:id, décodée par
+    // Express, peut contenir « ../ ») ni le nom d'origine n'entrent dans le chemin
+    filename: (req, _file, cb) => {
+      const id = intId(req.params.id) || 0;
+      cb(null, `candidate_${id}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.xlsx`);
     },
   }),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
@@ -88,7 +178,10 @@ function publicCandidate(c) {
   };
 }
 function publicUser(u) {
-  return { id: u.id, username: u.username, displayName: u.displayName, role: u.role };
+  return {
+    id: u.id, username: u.username, displayName: u.displayName, role: u.role,
+    mustChangePassword: !!u.mustChangePassword,
+  };
 }
 function getSettings() {
   return {
@@ -134,29 +227,136 @@ function lockDateFr(candidateId, sheet) {
 
 /* ════════════════ Authentification ════════════════ */
 
-app.post("/api/login", (req, res) => {
+// Cookie de session ; « Secure » dès que le site est servi en HTTPS
+function setSessionCookie(req, res, token, maxAge = 7 * 24 * 3600) {
+  res.setHeader("Set-Cookie",
+    `${auth.COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${maxAge}; SameSite=Lax${req.secure ? "; Secure" : ""}`);
+}
+
+app.post("/api/login", async (req, res) => {
   const username = strField((req.body || {}).username, 100);
   const password = (req.body || {}).password;
   if (!username || typeof password !== "string" || password.length > 500) {
     return res.status(401).json({ error: "Identifiants invalides." });
   }
+  const ipKey = clientKey(req.ip);
+  const userKey = ipKey + "|" + username.toLowerCase();
+  const accountKey = username.toLowerCase();
+  const wait = Math.max(loginIpLimiter.blockedFor(ipKey), loginUserLimiter.blockedFor(userKey),
+    loginAccountBackoff.blockedFor(accountKey));
+  if (wait) return tooManyAttempts(res, wait);
+
   const user = store.getUserByName(username);
-  if (!user || !auth.verifyPassword(password, user.passwordHash)) {
+  // Identifiant inconnu : vérification contre une empreinte factice, pour
+  // répondre dans le même temps qu'avec un compte existant
+  const ok = await auth.verifyPassword(password, user ? user.passwordHash : auth.DUMMY_HASH);
+  if (!user || !ok) {
+    loginIpLimiter.hit(ipKey);
+    loginUserLimiter.hit(userKey);
+    loginAccountBackoff.hit(accountKey);
     return res.status(401).json({ error: "Identifiants invalides." });
   }
-  const token = auth.createSession(user.id);
-  res.setHeader("Set-Cookie",
-    `${auth.COOKIE_NAME}=${token}; HttpOnly; Path=/; Max-Age=${7 * 24 * 3600}; SameSite=Lax`);
+  loginUserLimiter.reset(userKey);
+  loginAccountBackoff.reset(accountKey);
+  setSessionCookie(req, res, auth.createSession(user.id));
   res.json({ user: publicUser(user), allowedSheets: auth.allowedSheets(user) });
 });
 
-app.post("/api/logout", auth.requireAuth, (req, res) => {
-  store.deleteSession(req.user.token);
-  res.setHeader("Set-Cookie", `${auth.COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`);
+/* ── Inscription publique des membres de commission ──
+   Ouverte / fermée par l'administrateur. Le compte créé a TOUJOURS le rôle
+   « commission » (tout rôle envoyé par le client est ignoré) et ne voit aucun
+   candidat tant que l'admin ne l'a pas associé à une commission. */
+function registrationOpen() {
+  return store.getSetting("registrationOpen") === "1";
+}
+
+// Public : l'écran de connexion affiche le lien « Créer un compte » si ouvert
+app.get("/api/registration", (_req, res) => {
+  res.json({ open: registrationOpen() });
+});
+
+// Admin : ouvrir / fermer les inscriptions
+app.post("/api/registration", auth.requireRole("admin"), (req, res) => {
+  const open = (req.body || {}).open;
+  if (typeof open !== "boolean") return res.status(400).json({ error: "Valeur invalide." });
+  store.setSetting("registrationOpen", open ? "1" : "0");
+  res.json({ open });
+});
+
+app.post("/api/register", async (req, res) => {
+  const ipKey = clientKey(req.ip);
+  const wait = registerLimiter.blockedFor(ipKey);
+  if (wait) return tooManyAttempts(res, wait);
+  registerLimiter.hit(ipKey);
+
+  // Revérifié à chaque envoi : le formulaire a pu rester ouvert à l'écran
+  if (!registrationOpen()) {
+    return res.status(403).json({ error: "Les inscriptions sont fermées. Contactez l'administrateur." });
+  }
+  const body = req.body || {};
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!auth.USERNAME_RE.test(username)) {
+    return res.status(400).json({ error: "Identifiant invalide : " + auth.USERNAME_RULE });
+  }
+  const displayName = strField(body.displayName, 100);
+  if (!displayName) return res.status(400).json({ error: "Nom et prénom requis." });
+  const pwError = auth.checkNewPassword(body.password);
+  if (pwError) return res.status(400).json({ error: pwError });
+  if (store.getUserByNameNoCase(username)) {
+    return res.status(400).json({ error: "Cet identifiant est déjà utilisé." });
+  }
+
+  const passwordHash = await auth.hashPassword(body.password);
+  let user;
+  try {
+    user = store.addUser(username, passwordHash, displayName, "commission", { selfRegistered: true });
+  } catch {
+    // Deux inscriptions simultanées avec le même identifiant (contrainte UNIQUE)
+    return res.status(400).json({ error: "Cet identifiant est déjà utilisé." });
+  }
+  setSessionCookie(req, res, auth.createSession(user.id));
+  res.json({ user: publicUser(user), allowedSheets: auth.allowedSheets(user) });
+});
+
+// Changement de son propre mot de passe (tous les rôles). Accessible avec un
+// mot de passe provisoire : c'est justement le moyen de le remplacer.
+app.post("/api/me/password", auth.requireAuthAllowProvisional, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== "string" || currentPassword.length < 1 || currentPassword.length > 500) {
+    return res.status(400).json({ error: "Mot de passe actuel requis." });
+  }
+  const key = "user:" + req.user.id;
+  const wait = passwordCheckLimiter.blockedFor(key);
+  if (wait) return tooManyAttempts(res, wait);
+
+  const fullUser = store.getUser(req.user.id);
+  // 403 et non 401 : le client interprète 401 comme « session expirée »
+  if (!fullUser || !(await auth.verifyPassword(currentPassword, fullUser.passwordHash))) {
+    passwordCheckLimiter.hit(key);
+    return res.status(403).json({ error: "Mot de passe actuel incorrect." });
+  }
+  passwordCheckLimiter.reset(key);
+  const pwError = auth.checkNewPassword(newPassword);
+  if (pwError) return res.status(400).json({ error: pwError });
+  if (newPassword === currentPassword) {
+    return res.status(400).json({ error: "Le nouveau mot de passe doit être différent de l'actuel." });
+  }
+  // Mot de passe choisi par l'utilisateur : n'est plus provisoire
+  store.updateUserPassword(req.user.id, await auth.hashPassword(newPassword), false);
+  // Déconnecte les autres navigateurs / appareils, garde la session courante
+  auth.destroyUserSessions(req.user.id, req.user.token);
+  closeUserSockets(req.user.id, req.user.token);
   res.json({ ok: true });
 });
 
-app.get("/api/me", auth.requireAuth, (req, res) => {
+app.post("/api/logout", auth.requireAuthAllowProvisional, (req, res) => {
+  auth.destroySession(req.user.token);
+  closeSessionSockets(req.user.token); // les WebSocket de cette session aussi
+  setSessionCookie(req, res, "", 0);
+  res.json({ ok: true });
+});
+
+app.get("/api/me", auth.requireAuthAllowProvisional, (req, res) => {
   res.json({ user: publicUser(req.user), allowedSheets: auth.allowedSheets(req.user) });
 });
 
@@ -205,9 +405,10 @@ app.get("/api/candidates", auth.requireAuth, (req, res) => {
     for (const key of SHEET_ORDER) {
       pub.locks[key] = !!locks[key];
       const d = dataBySheet[key];
-      pub.overrides[key] = isValidOverride(d.noteOverride);
-      // La soutenance n'est visible qu'une fois verrouillée par la commission
+      // La soutenance n'est visible qu'une fois verrouillée par la commission :
+      // ni sa note, ni même le fait qu'une note définitive ait été saisie
       const visible = key !== "SO" || soLocked;
+      pub.overrides[key] = visible && isValidOverride(d.noteOverride);
       pub.notes[key] = visible ? proposedNote(key, d.evaluation, d.bonus, d.noteOverride) : null;
     }
     // Note finale : seulement si la soutenance est communiquée (verrouillée)
@@ -406,8 +607,32 @@ app.get("/download/:file", auth.requireAuth, (req, res) => {
   if (owner !== req.user.id) return res.status(403).send("Accès refusé.");
   const full = path.join(EXPORT_DIR, file);
   if (!fs.existsSync(full)) return res.status(404).send("Fichier introuvable.");
-  res.download(full);
+  // Téléchargement unique : la copie (noms + notes) est supprimée du serveur
+  // une fois envoyée. Les exports jamais téléchargés sont supprimés au bout
+  // d'une heure (sweepExports).
+  res.download(full, (err) => {
+    if (err) return;
+    downloadOwners.delete(file);
+    fs.unlink(full, () => {});
+  });
 });
+
+// Supprime les exports plus anciens que maxAgeMs (tous si 0)
+const EXPORT_MAX_AGE_MS = 60 * 60 * 1000;
+function sweepExports(maxAgeMs = EXPORT_MAX_AGE_MS) {
+  let removed = 0;
+  let names = [];
+  try { names = fs.readdirSync(EXPORT_DIR); } catch { return 0; }
+  const now = Date.now();
+  for (const name of names) {
+    if (name.startsWith(".")) continue; // .gitkeep
+    const full = path.join(EXPORT_DIR, name);
+    try {
+      if (now - fs.statSync(full).mtimeMs >= maxAgeMs) { fs.unlinkSync(full); downloadOwners.delete(name); removed++; }
+    } catch {}
+  }
+  return removed;
+}
 
 /* ════════════════ Verrouillage ════════════════ */
 
@@ -426,28 +651,35 @@ app.post("/api/lock", auth.requireAuth, (req, res) => {
   }
   const lockedAt = new Date().toISOString();
   store.lock(candidateId, sheet, lockedAt, req.user.id);
-  broadcastAll({ type: "lockchanged", candidateId, sheet });
+  broadcastLockChanged(candidateId, sheet);
   res.json({ ok: true, lockedAt });
 });
 
 // Verrouille le LOT : toutes les soutenances des candidats attribués au membre
 // de commission. Double confirmation côté client + mot de passe ici.
-app.post("/api/lock-batch", auth.requireRole("commission"), (req, res) => {
+app.post("/api/lock-batch", auth.requireRole("commission"), async (req, res) => {
   const password = (req.body || {}).password;
   if (typeof password !== "string" || password.length < 1 || password.length > 500) {
     return res.status(400).json({ error: "Mot de passe requis." });
   }
+  const key = "user:" + req.user.id;
+  const wait = passwordCheckLimiter.blockedFor(key);
+  if (wait) return tooManyAttempts(res, wait);
   const fullUser = store.getUser(req.user.id);
-  if (!fullUser || !auth.verifyPassword(password, fullUser.passwordHash)) {
-    return res.status(401).json({ error: "Mot de passe incorrect." });
+  // 403 et non 401 : le client interprète 401 comme « session expirée »
+  // et renverrait le juré à l'écran de connexion
+  if (!fullUser || !(await auth.verifyPassword(password, fullUser.passwordHash))) {
+    passwordCheckLimiter.hit(key);
+    return res.status(403).json({ error: "Mot de passe incorrect." });
   }
+  passwordCheckLimiter.reset(key);
   const candidates = store.listCandidatesForCommission(req.user.id);
   const lockedAt = new Date().toISOString();
   let locked = 0;
   for (const c of candidates) {
     if (store.lock(c.id, "SO", lockedAt, req.user.id)) {
       locked++;
-      broadcastAll({ type: "lockchanged", candidateId: c.id, sheet: "SO" });
+      broadcastLockChanged(c.id, "SO");
     }
   }
   res.json({ ok: true, locked, total: candidates.length });
@@ -459,28 +691,43 @@ app.get("/api/users", auth.requireRole("admin"), (_req, res) => {
   res.json(store.listUsers());
 });
 
-app.post("/api/users", auth.requireRole("admin"), (req, res) => {
+app.post("/api/users", auth.requireRole("admin"), async (req, res) => {
   const username = strField((req.body || {}).username, 100);
   const password = (req.body || {}).password;
   const displayName = optStrField((req.body || {}).displayName, 100);
   const role = (req.body || {}).role;
-  if (!username || typeof password !== "string" || password.length < 1 || password.length > 500 || displayName === null) {
+  if (!username || typeof password !== "string" || displayName === null) {
     return res.status(400).json({ error: "Identifiant et mot de passe requis." });
   }
+  const pwError = auth.checkNewPassword(password);
+  if (pwError) return res.status(400).json({ error: pwError });
   if (!["admin", "teacher", "commission"].includes(role)) return res.status(400).json({ error: "Rôle invalide." });
-  if (store.getUserByName(username)) return res.status(400).json({ error: "Cet identifiant existe déjà." });
-  const u = store.addUser(username, auth.hashPassword(password), displayName, role);
+  if (store.getUserByNameNoCase(username)) return res.status(400).json({ error: "Cet identifiant existe déjà." });
+  const passwordHash = await auth.hashPassword(password);
+  let u;
+  try {
+    // Mot de passe provisoire : l'utilisateur devra le changer à sa première connexion
+    u = store.addUser(username, passwordHash, displayName, role, { mustChangePassword: true });
+  } catch {
+    return res.status(400).json({ error: "Cet identifiant existe déjà." });
+  }
   res.json(publicUser(u));
 });
 
-app.post("/api/users/:id/password", auth.requireRole("admin"), (req, res) => {
+// Réinitialisation par l'admin (mot de passe oublié) : mot de passe provisoire,
+// à changer à la prochaine connexion ; toutes les sessions du compte sont fermées
+app.post("/api/users/:id/password", auth.requireRole("admin"), async (req, res) => {
   const id = intId(req.params.id);
   const password = (req.body || {}).password;
-  if (typeof password !== "string" || password.length < 1 || password.length > 500) {
-    return res.status(400).json({ error: "Mot de passe requis." });
-  }
+  const pwError = auth.checkNewPassword(password);
+  if (pwError) return res.status(400).json({ error: pwError });
   if (!id || !store.getUser(id)) return res.status(404).json({ error: "Utilisateur introuvable." });
-  store.updateUserPassword(id, auth.hashPassword(password));
+  const own = id === req.user.id; // l'admin connaît son propre mot de passe
+  store.updateUserPassword(id, await auth.hashPassword(password), !own);
+  // L'admin qui réinitialise son propre compte garde sa session courante
+  const keep = own ? req.user.token : undefined;
+  auth.destroyUserSessions(id, keep);
+  closeUserSockets(id, keep);
   res.json({ ok: true });
 });
 
@@ -493,7 +740,8 @@ app.delete("/api/users/:id", auth.requireRole("admin"), (req, res) => {
     return res.status(400).json({ error: "Impossible de supprimer le dernier administrateur." });
   }
   if (id === req.user.id) return res.status(400).json({ error: "Vous ne pouvez pas supprimer votre propre compte." });
-  store.deleteUser(id);
+  store.deleteUser(id); // CASCADE : sessions, appartenances aux commissions/classes
+  closeUserSockets(id);
   res.json({ ok: true });
 });
 
@@ -619,8 +867,23 @@ app.delete("/api/classes/:id/candidates/:candidateId", auth.requireRole("admin")
 });
 
 /* ════════════════ Purge annuelle (admin) ════════════════
-   Archive la base puis supprime tous les candidats et leurs fichiers. */
-app.post("/api/purge", auth.requireRole("admin"), (req, res) => {
+   Archive la base puis supprime tous les candidats et leurs fichiers.
+   Action destructrice : le mot de passe de l'admin est exigé (une requête
+   forgée par une autre page ne peut pas le fournir). */
+app.post("/api/purge", auth.requireRole("admin"), async (req, res) => {
+  const password = (req.body || {}).password;
+  if (typeof password !== "string" || password.length < 1 || password.length > 500) {
+    return res.status(400).json({ error: "Mot de passe requis." });
+  }
+  const key = "user:" + req.user.id;
+  const wait = passwordCheckLimiter.blockedFor(key);
+  if (wait) return tooManyAttempts(res, wait);
+  const fullUser = store.getUser(req.user.id);
+  if (!fullUser || !(await auth.verifyPassword(password, fullUser.passwordHash))) {
+    passwordCheckLimiter.hit(key);
+    return res.status(403).json({ error: "Mot de passe incorrect." });
+  }
+  passwordCheckLimiter.reset(key);
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const archivePath = path.join(DATA_DIR, `archive-${stamp}.db`);
@@ -632,6 +895,7 @@ app.post("/api/purge", auth.requireRole("admin"), (req, res) => {
       try { if (p && fs.existsSync(p)) { fs.unlinkSync(p); filesRemoved++; } } catch {}
     }
     const removed = store.purgeCandidates();
+    sweepExports(0); // exports en attente de téléchargement : supprimés aussi
     broadcastAll({ type: "candidates" });
     res.json({ ok: true, archived: path.basename(archivePath), removed, filesRemoved });
   } catch (e) {
@@ -670,15 +934,53 @@ app.use((err, _req, res, _next) => {
 
 /* ════════════════ WebSocket (synchro temps réel) ════════════════ */
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+
+/* Limites WebSocket :
+   - message de 64 Ko maximum (au lieu de 100 Mo par défaut) : un commentaire
+     fait au plus 5000 caractères ;
+   - 20 connexions simultanées par utilisateur (plusieurs onglets) ;
+   - 300 messages par tranche de 10 s et par connexion (cocher un critère
+     parent envoie un message par sous-critère). */
+const WS_MAX_PAYLOAD = 64 * 1024;
+const WS_MAX_SOCKETS_PER_USER = 20;
+const WS_MAX_MESSAGES = 300;
+const WS_MESSAGE_WINDOW_MS = 10 * 1000;
+
+const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
+
+/* Ouverture d'une connexion WebSocket : origine contrôlée AVANT la poignée
+   de main. Toute erreur est contenue : une requête malformée ne doit jamais
+   faire tomber le serveur. */
+server.on("upgrade", (req, socket, head) => {
+  socket.on("error", () => {});
+  try {
+    if (fromOtherSite(req)) {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  } catch {
+    socket.destroy();
+  }
+});
 
 function roomKey(candidateId, sheet) { return candidateId + ":" + sheet; }
 
 wss.on("connection", (ws, req) => {
-  const user = auth.userFromRequest(req);
+  // Trame invalide, message trop gros… : `ws` émet « error » puis ferme la
+  // connexion. Sans écouteur, cet événement arrêtait tout le processus.
+  ws.on("error", () => {});
+  let user = null;
+  try { user = auth.userFromRequest(req); } catch {}
   if (!user) { ws.close(4001, "Authentification requise"); return; }
+  if (user.mustChangePassword) { ws.close(4003, "Mot de passe provisoire à changer"); return; }
+  let count = 0;
+  for (const c of wss.clients) if (c.user && c.user.id === user.id) count++;
+  if (count >= WS_MAX_SOCKETS_PER_USER) { ws.close(1008, "Trop de connexions"); return; }
   ws.user = user;
   ws.room = null;
+  ws.msgWindowStart = Date.now();
+  ws.msgCount = 0;
 
   ws.on("message", (raw) => {
     // Aucune donnée WS n'est digne de confiance : tout est validé, et
@@ -688,9 +990,22 @@ wss.on("connection", (ws, req) => {
   });
 });
 
+/* La session est-elle toujours valide (non déconnectée, non expirée, compte
+   existant) ? Revérifié à chaque message : une connexion ouverte ne garde
+   pas ses droits au-delà de sa session. */
+function wsSessionValid(ws) {
+  if (auth.getSession(ws.user.token)) return true;
+  try { ws.close(4001, "Session expirée"); } catch {}
+  return false;
+}
+
 function handleWsMessage(ws, raw) {
     if (typeof raw !== "string" && !Buffer.isBuffer(raw)) return;
+    const now = Date.now();
+    if (now - ws.msgWindowStart > WS_MESSAGE_WINDOW_MS) { ws.msgWindowStart = now; ws.msgCount = 0; }
+    if (++ws.msgCount > WS_MAX_MESSAGES) { ws.close(1008, "Trop de messages"); return; }
     if (raw.length > 20000) return;
+    if (!wsSessionValid(ws)) return;
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg !== "object") return;
@@ -713,25 +1028,13 @@ function handleWsMessage(ws, raw) {
         return;
       }
       ws.room = roomKey(candidateId, sheet);
-      const extra = store.getExtra(candidateId, sheet);
-      ws.send(JSON.stringify({
-        type: "state",
-        state: store.getEvaluation(candidateId, sheet),
-        comment: extra.text,
-        bonus: extra.bonus,
-        noteOverride: extra.noteOverride,
-        locked: !!lock,
-        lockedAt: lock ? lock.lockedAt : null,
-        lockedByName: lock ? (lock.lockedByName || lock.lockedByUser || "—") : null,
-        canEdit: canEditSheetNow(ws.user, candidateId, sheet),
-        canLock: !lock && canLockSheet(ws.user, candidateId, sheet),
-      }));
+      sendState(ws);
     }
 
     else if (msg.type === "set") {
       if (!ws.room) return;
       // role + accès + NON verrouillé (revérifié à chaque message)
-      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return refuseWrite(ws);
       const { candidateId, sheet } = ws;
       if (typeof msg.itemId !== "string" || !VALID_IDS[sheet].has(msg.itemId)) return;
       const checked = !!msg.checked;
@@ -741,9 +1044,11 @@ function handleWsMessage(ws, raw) {
 
     else if (msg.type === "comment") {
       if (!ws.room) return;
-      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return refuseWrite(ws);
       if (typeof msg.text !== "string") return;
-      const text = msg.text.slice(0, 5000);
+      // Caractères de contrôle retirés (sauf tabulation et retours à la ligne) :
+      // interdits dans le XML du classeur Excel, ils le rendraient illisible
+      const text = msg.text.slice(0, 5000).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
       store.setComment(ws.candidateId, ws.sheet, text);
       // Diffuser aux AUTRES clients de la salle (pas l'émetteur, qui tape)
       broadcastRoom(ws.room, { type: "comment", text }, ws);
@@ -751,7 +1056,7 @@ function handleWsMessage(ws, raw) {
 
     else if (msg.type === "bonus") {
       if (!ws.room) return;
-      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return refuseWrite(ws);
       // Bonus sur 2 points, borné [0, 2] ; NaN/Infinity/objets rejetés
       const n = Number(msg.bonus);
       if (!Number.isFinite(n)) return;
@@ -762,7 +1067,7 @@ function handleWsMessage(ws, raw) {
 
     else if (msg.type === "noteOverride") {
       if (!ws.room) return;
-      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return;
+      if (!canEditSheetNow(ws.user, ws.candidateId, ws.sheet)) return refuseWrite(ws);
       // Vide -> efface la note définitive ; sinon nombre dans [0, 20]
       let value = null;
       if (!(msg.value === null || msg.value === undefined || msg.value === "")) {
@@ -775,26 +1080,123 @@ function handleWsMessage(ws, raw) {
     }
 }
 
+// État complet de l'onglet suivi par cette connexion
+function sendState(ws) {
+  const { candidateId, sheet } = ws;
+  const lock = store.getLock(candidateId, sheet);
+  const extra = store.getExtra(candidateId, sheet);
+  ws.send(JSON.stringify({
+    type: "state",
+    state: store.getEvaluation(candidateId, sheet),
+    comment: extra.text,
+    bonus: extra.bonus,
+    noteOverride: extra.noteOverride,
+    locked: !!lock,
+    lockedAt: lock ? lock.lockedAt : null,
+    lockedByName: lock ? (lock.lockedByName || lock.lockedByUser || "—") : null,
+    canEdit: canEditSheetNow(ws.user, candidateId, sheet),
+    canLock: !lock && canLockSheet(ws.user, candidateId, sheet),
+  }));
+}
+
+// Accès à ce candidat retiré : la connexion quitte la salle et le client est prévenu
+function revoke(ws) {
+  ws.room = null;
+  try { ws.send(JSON.stringify({ type: "revoked" })); } catch {}
+}
+
+/* Écriture refusée (accès retiré, onglet verrouillé entre-temps…) : l'auteur
+   est prévenu au lieu de croire sa saisie enregistrée. */
+function refuseWrite(ws) {
+  if (!canViewSheet(ws.user, ws.candidateId, ws.sheet)) return revoke(ws);
+  sendState(ws); // l'écran se resynchronise avec ce qui est réellement enregistré
+}
+
+/* Diffusion aux autres membres d'une salle (candidat + onglet).
+   Les droits de CHAQUE destinataire sont revérifiés : un juré retiré de sa
+   commission, un enseignant retiré de sa classe ou une session fermée ne
+   doivent plus recevoir les saisies en direct. */
 function broadcastRoom(room, payload, except) {
   const data = JSON.stringify(payload);
   for (const client of wss.clients) {
-    if (client.readyState === 1 && client.room === room && client !== except) client.send(data);
+    if (client.readyState !== 1 || client.room !== room || client === except) continue;
+    if (!wsSessionValid(client)) continue;
+    if (!canViewSheet(client.user, client.candidateId, client.sheet)) { revoke(client); continue; }
+    client.send(data);
   }
 }
+/* Message sans donnée (« la liste a changé, rechargez-la ») : à tous.
+   Envoyé après chaque modification des candidats, classes et commissions :
+   on en profite pour revérifier l'accès de chaque connexion en cours de
+   saisie (prévenue immédiatement si l'admin vient de lui retirer l'accès). */
 function broadcastAll(payload) {
   const data = JSON.stringify(payload);
   for (const client of wss.clients) {
-    if (client.readyState === 1) client.send(data);
+    if (client.readyState !== 1) continue;
+    client.send(data);
+    if (client.room && client.user && !canViewSheet(client.user, client.candidateId, client.sheet)) revoke(client);
+  }
+}
+// Verrouillage : seulement aux utilisateurs qui ont accès à ce candidat
+function broadcastLockChanged(candidateId, sheet) {
+  const data = JSON.stringify({ type: "lockchanged", candidateId, sheet });
+  for (const client of wss.clients) {
+    if (client.readyState === 1 && client.user && auth.canAccessCandidate(client.user, candidateId)) {
+      client.send(data);
+    }
+  }
+}
+
+/* Ferme les WebSocket d'un utilisateur dont les sessions ont été révoquées
+   (changement / réinitialisation de mot de passe, suppression du compte),
+   sauf celle de la session exceptToken. Sans cela, une connexion déjà
+   ouverte continuerait à pouvoir écrire malgré la révocation. */
+function closeUserSockets(userId, exceptToken) {
+  for (const client of wss.clients) {
+    if (client.user && client.user.id === userId && client.user.token !== exceptToken) {
+      try { client.close(4001, "Session fermée"); } catch {}
+    }
+  }
+}
+// Ferme les WebSocket d'une session précise (déconnexion)
+function closeSessionSockets(token) {
+  for (const client of wss.clients) {
+    if (client.user && client.user.token === token) {
+      try { client.close(4001, "Session fermée"); } catch {}
+    }
   }
 }
 
 /* ════════════════ Démarrage ════════════════ */
-store.purgeSessions();
-const created = auth.ensureDefaultAdmin();
+
+/* Droits des fichiers déjà présents (installations existantes, créées avant
+   le réglage umask) : dossiers 700, base et fichiers 600. Sans effet sous
+   Windows. */
+function restrictPermissions() {
+  if (process.platform === "win32") return;
+  const chmod = (p, mode) => { try { fs.chmodSync(p, mode); } catch {} };
+  for (const dir of [DATA_DIR, UPLOAD_DIR, EXPORT_DIR]) {
+    chmod(dir, 0o700);
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    for (const name of names) chmod(path.join(dir, name), 0o600);
+  }
+  for (const suffix of ["", "-wal", "-shm"]) chmod(store.DB_FILE + suffix, 0o600);
+}
+
+async function start() {
+  store.purgeSessions();
+  restrictPermissions();
+  sweepExports();
+  setInterval(sweepExports, 10 * 60 * 1000).unref();
+  const created = await auth.ensureDefaultAdmin();
+  const legacyAdmin = await auth.flagLegacyDefaultAdmin();
+  listen(created, legacyAdmin);
+}
 
 // Erreurs d'écoute (port privilégié, port déjà pris…) : message clair au lieu
-// d'une pile d'erreur. `ws` relaie les erreurs du serveur HTTP sur `wss`.
-wss.on("error", (err) => {
+// d'une pile d'erreur.
+server.on("error", (err) => {
   if (err.code === "EACCES") {
     console.error(`\n  ✖ Permission refusée pour écouter sur le port ${PORT}.`);
     console.error(`    Sous Linux, les ports < 1024 sont réservés à root.`);
@@ -809,19 +1211,35 @@ wss.on("error", (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, () => {
-  console.log(`\n  ✅ Serveur d'évaluation E6 démarré`);
-  console.log(`  ➜  Local   : http://localhost:${PORT}`);
-  const nets = require("os").networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal)
-        console.log(`  ➜  Réseau  : http://${net.address}:${PORT}`);
+function listen(created, legacyAdmin) {
+  server.listen(PORT, HOST, () => {
+    console.log(`\n  ✅ Serveur d'évaluation E6 démarré`);
+    if (HOST && HOST !== "0.0.0.0" && HOST !== "::") {
+      console.log(`  ➜  Écoute  : http://${HOST.includes(":") ? `[${HOST}]` : HOST}:${PORT} (seulement cette adresse)`);
+    } else {
+      console.log(`  ➜  Local   : http://localhost:${PORT}`);
+      const nets = require("os").networkInterfaces();
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+          if (net.family === "IPv4" && !net.internal)
+            console.log(`  ➜  Réseau  : http://${net.address}:${PORT}`);
+        }
+      }
     }
-  }
-  if (created) {
-    console.log(`\n  ⚠ Compte administrateur créé : ${created.username} / ${created.password}`);
-    console.log(`    Changez ce mot de passe depuis le panneau d'administration.`);
-  }
-  console.log("");
+    if (created) {
+      console.log(`\n  ⚠ Compte administrateur créé : ${created.username} / ${created.password}`);
+      console.log(`    Mot de passe provisoire, affiché une seule fois : il devra être changé`);
+      console.log(`    à la première connexion.`);
+    }
+    if (legacyAdmin) {
+      console.log(`\n  ⚠ Le compte « admin » utilise encore le mot de passe par défaut « admin ».`);
+      console.log(`    Il devra être changé à la prochaine connexion.`);
+    }
+    console.log("");
+  });
+}
+
+start().catch((err) => {
+  console.error("\n  ✖ Échec du démarrage :", err.message, "\n");
+  process.exit(1);
 });

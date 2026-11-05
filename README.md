@@ -9,6 +9,9 @@ npm install
 npm start
 ```
 
+Tests automatiques (inscription, mots de passe, sécurité : chaque attaque relevée lors de l'audit est rejouée) : `npm test`.
+Ils démarrent le serveur sur une base temporaire et ne touchent pas à `data/evaluations.db`.
+
 ### Prérequis sur Linux (Debian / Ubuntu)
 
 `better-sqlite3` est un module natif. Si aucun binaire précompilé n'est disponible pour la
@@ -26,9 +29,14 @@ rm -rf node_modules && npm install
 
 ## Déploiement (serveur Linux)
 
-Sous Linux, un compte non-root ne peut pas écouter sur un port inférieur à 1024 (dont le 80) :
-`PORT=80 npm start` échoue avec « Permission refusée ». Configuration recommandée :
-l'application tourne sur le port 3000 sous le compte `debian`, et **nginx** la publie sur le port 80.
+Configuration recommandée : l'application tourne sur le port 3000 sous le compte `debian`,
+**n'écoute que sur la machine elle-même** (`HOST=127.0.0.1`), et **nginx** la publie en
+**HTTPS**. Sans HTTPS, les mots de passe, les cookies de session et les notes circulent
+**en clair** sur le réseau (Wi-Fi compris) : n'importe qui à l'écoute peut les lire et se
+connecter à la place d'un utilisateur, y compris de l'administrateur.
+
+> Sous Linux, un compte non-root ne peut pas écouter sur un port inférieur à 1024 :
+> `PORT=80 npm start` échoue avec « Permission refusée ». C'est nginx qui écoute sur 80/443.
 
 ### 1. Service systemd (démarrage automatique, redémarrage en cas de crash)
 
@@ -44,8 +52,17 @@ Type=simple
 User=debian
 WorkingDirectory=/home/debian/EvalE6/BTS-CIEL-E6-EvalHelper
 Environment=PORT=3000
+# Écoute uniquement en local : seul nginx (donc HTTPS) peut joindre l'application
+Environment=HOST=127.0.0.1
 ExecStart=/usr/bin/node server.js
 Restart=always
+# Fichiers créés (base, exports, archives) lisibles par le seul compte debian
+UMask=0077
+# Durcissement : pas d'élévation de privilèges, /usr /boot /etc en lecture seule,
+# /tmp privé
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -57,18 +74,40 @@ sudo systemctl enable --now evale6
 journalctl -u evale6 -f        # logs (dont le mot de passe admin initial)
 ```
 
-### 2. nginx en reverse proxy sur le port 80
+L'application applique d'elle-même ces droits restreints (dossiers `data/`, `uploads/`,
+`exports/` en 700, fichiers en 600) à chaque démarrage ; `UMask=0077` est une sécurité de plus.
+
+### 2. nginx en HTTPS
 
 ```bash
 sudo apt install -y nginx
 ```
 
-`/etc/nginx/sites-available/evale6` :
+Il faut un **certificat** pour le nom du serveur :
+- **serveur joignable depuis Internet avec un nom de domaine** : certificat gratuit
+  Let's Encrypt (`sudo apt install -y certbot python3-certbot-nginx` puis
+  `sudo certbot --nginx -d eval-e6.mon-lycee.fr`, renouvellement automatique) ;
+- **serveur interne** : certificat fourni par le service informatique de l'établissement
+  ou de l'académie (à défaut un certificat auto-signé, mais chaque navigateur affichera
+  un avertissement à accepter une fois).
+
+`/etc/nginx/sites-available/evale6` (remplacer `eval-e6.mon-lycee.fr` et les chemins du certificat) :
 
 ```nginx
+# HTTP -> HTTPS
 server {
     listen 80;
-    server_name _;
+    server_name eval-e6.mon-lycee.fr;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name eval-e6.mon-lycee.fr;
+
+    ssl_certificate     /etc/letsencrypt/live/eval-e6.mon-lycee.fr/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/eval-e6.mon-lycee.fr/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
 
     client_max_body_size 30m;               # upload des fichiers Excel (25 Mo max côté appli)
 
@@ -78,6 +117,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;   # indispensable pour le WebSocket
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;  # adresse réelle du client (limitation des tentatives)
+        proxy_set_header X-Forwarded-Proto $scheme;     # HTTPS : cookie « Secure » + HSTS
         proxy_read_timeout 1h;                   # évite la coupure du WebSocket inactif
     }
 }
@@ -89,31 +130,69 @@ sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Sans les en-têtes `Upgrade`/`Connection`, les pages s'affichent mais la synchronisation
-temps réel ne passe pas (badge « Hors ligne »). nginx permet aussi d'ajouter HTTPS plus tard.
+À quoi servent les en-têtes :
+- `Upgrade` / `Connection` : sans eux, les pages s'affichent mais la synchronisation temps
+  réel ne passe pas (badge « Hors ligne ») ;
+- `X-Forwarded-For` : sans lui, l'application voit toutes les connexions comme venant de
+  nginx et la limitation des tentatives s'applique à tout le monde à la fois ;
+- `X-Forwarded-Proto` : indique à l'application qu'elle est servie en HTTPS (cookie de
+  session `Secure`, en-tête HSTS).
 
-### Alternative rapide (sans nginx)
+Ces en-têtes ne sont acceptés que s'ils viennent de la machine elle-même : un client ne peut
+pas les falsifier.
 
-Autoriser Node à écouter sur les ports privilégiés :
+**Port non standard** (ex. `https://serveur:8443`) : utiliser `proxy_set_header Host $http_host;`
+(qui garde le port), ou définir `Environment=PUBLIC_ORIGIN=https://serveur:8443` dans le service.
+Sinon les navigateurs anciens (sans en-tête `Sec-Fetch-Site`) seraient refusés par la
+protection contre les requêtes venant d'un autre site.
+
+### 3. Pare-feu
+
+N'ouvrir que SSH, HTTP (redirection) et HTTPS. Avec `HOST=127.0.0.1`, le port 3000 n'est de
+toute façon pas joignable depuis le réseau.
 
 ```bash
-sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(which node)")"
-PORT=80 npm start
+sudo apt install -y ufw
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'      # 80 et 443
+sudo ufw enable
 ```
 
-Inconvénients : le droit s'applique à **tous** les scripts Node de la machine, et il est
-perdu à chaque mise à jour de Node (à refaire).
+### Alternative rapide (sans nginx, réseau local uniquement)
 
-Le serveur affiche les adresses d'accès :
+Pour un essai sur un réseau de confiance : `npm start`, puis donner l'adresse affichée
+(`http://192.168.x.x:3000`) aux évaluateurs. **Tout circule alors en clair** : à réserver aux
+tests, jamais pour une session d'examen réelle ni sur un réseau Wi-Fi partagé.
 
-```
-➜  Local   : http://localhost:3000
-➜  Réseau  : http://192.168.x.x:3000     ← à donner aux autres évaluateurs (même réseau)
-```
+### Premier lancement
 
-Au **premier lancement**, un compte administrateur est créé : **admin / admin** (affiché dans la console). Changez ce mot de passe depuis le panneau d'administration.
+Un compte **`admin`** est créé avec un **mot de passe aléatoire**, affiché **une seule fois**
+dans la console (`journalctl -u evale6` avec systemd). On peut aussi le fixer avec la variable
+`ADMIN_INITIAL_PASSWORD`. Ce mot de passe est **provisoire** : à la première connexion,
+l'application exige de le remplacer avant de donner accès à quoi que ce soit.
 
-Pour changer le port : `PORT=8080 npm start`.
+Installation existante dont le compte `admin` a encore le mot de passe `admin` : il est
+détecté au démarrage et devra être changé à la prochaine connexion.
+
+### Variables d'environnement
+
+| Variable | Rôle | Défaut |
+|---|---|---|
+| `PORT` | Port d'écoute | `3000` |
+| `HOST` | Adresse d'écoute (`127.0.0.1` derrière nginx) | toutes les interfaces |
+| `DB_FILE` | Chemin de la base SQLite | `data/evaluations.db` |
+| `ADMIN_INITIAL_PASSWORD` | Mot de passe provisoire du compte `admin` créé au premier lancement | aléatoire |
+| `PUBLIC_ORIGIN` | Adresse(s) publique(s) du site, séparées par des virgules, si le proxy modifie l'en-tête `Host` | — |
+
+### Données personnelles : conservation
+
+- **Exports Excel** : supprimés du serveur dès leur téléchargement, au plus tard au bout d'une
+  heure s'ils ne sont jamais téléchargés, et à la purge.
+- **Archives de purge** (`data/archive-<date>.db`) : copie complète de l'année (candidats, notes,
+  comptes), sans les sessions. Elles ne sont jamais supprimées automatiquement : les supprimer
+  quand la durée de conservation fixée par l'établissement est écoulée.
+- **Sauvegarde** : copier `data/` (la base) et `uploads/` (fichiers Excel des candidats), en
+  conservant des droits restreints sur la copie.
 
 ## Rôles et droits
 
@@ -128,7 +207,10 @@ Pour changer le port : `PORT=8080 npm start`.
 | Export d'un onglet | Soutenance | ✓ (ses classes) | ✓ |
 | Export complet (5 onglets) | — | ✓ (ses classes) | ✓ |
 | **Export groupé (zip)** | — | ✓ (ses classes) | ✓ (tous) |
+| Créer son compte (si les inscriptions sont ouvertes) | ✓ | — | — |
+| Changer son propre mot de passe (« Mon compte ») | ✓ | ✓ | ✓ |
 | Comptes, classes, commissions, paramètres, purge | — | — | ✓ |
+| Ouvrir / fermer les inscriptions | — | — | ✓ |
 
 **Pourquoi ?** La soutenance est menée par un jury externe (la commission) qui ne doit pas être influencé par les notes des autres oraux : il ne voit que la saisie soutenance. Inversement, l'onglet Soutenance n'est **modifiable que par la commission** — l'établissement le voit en lecture seule, pour éviter toute altération de l'évaluation du jury. L'établissement trace tous les oraux et génère l'Excel final complet — c'est l'Excel qui calcule la note.
 
@@ -140,6 +222,34 @@ Deux regroupements distincts, configurés par l'**administrateur** :
 - **Commission** (jury externe de soutenance) : rassemble des **membres de commission** et les **candidats** qu'ils évaluent en soutenance.
 
 La création/modification des candidats et tous les rattachements sont réservés à l'administrateur.
+
+## Comptes et inscriptions
+
+Pour que l'administrateur n'ait pas à connaître les mots de passe des jurés, les membres de
+commission peuvent **créer leur compte eux-mêmes** :
+
+1. Dans **Administration → Inscriptions des membres de commission**, l'admin clique sur
+   **« Ouvrir les inscriptions »** et communique l'adresse de l'application aux jurés.
+2. L'écran de connexion affiche alors un lien **« Créer un compte »** : le juré choisit son
+   identifiant (3 à 50 caractères : lettres sans accent, chiffres, `.` `_` `-`), indique ses
+   nom et prénom et son mot de passe (8 caractères minimum). Il est connecté directement.
+3. Le compte a **toujours** le rôle « Membre de commission » (le serveur ignore tout autre rôle)
+   et **ne voit aucun candidat** tant que l'admin ne l'a pas associé à une commission.
+   Dans la liste des comptes, il porte les badges **« Auto-inscrit »** et **« ⏳ Sans commission »** ;
+   un compteur signale les comptes en attente d'affectation.
+4. L'admin vérifie l'identité du juré, l'associe à sa commission (section « Commissions »),
+   puis **ferme les inscriptions**. Un compte inconnu ou en double se supprime simplement.
+
+L'admin peut toujours créer lui-même des comptes (enseignants, administrateurs, ou jurés) avec un
+**mot de passe provisoire** (champ masqué). À sa **première connexion**, l'utilisateur doit le
+remplacer par le sien avant d'accéder à quoi que ce soit : l'admin ne connaît donc jamais le mot
+de passe définitif. Ensuite, chacun peut changer son mot de passe quand il veut depuis
+**« Mon compte »** (le mot de passe actuel est demandé).
+
+- Changer son mot de passe **déconnecte ses autres sessions** (autres navigateurs ou appareils).
+- En cas d'oubli, l'admin **réinitialise** le mot de passe (bouton « Mot de passe ») avec un
+  nouveau mot de passe provisoire, à remplacer à la connexion suivante : toutes les sessions du
+  compte sont fermées.
 
 ## Verrouillage des onglets
 
@@ -170,7 +280,7 @@ Bouton **« Verrouiller le lot »** : verrouille la soutenance de **tous** les c
 
 ## Purge de début d'année
 
-Bouton dédié dans le panneau d'administration : il **archive** d'abord la base (copie `data/archive-<date>.db`), puis **supprime tous les candidats** et leurs évaluations/fichiers. Les comptes, classes, commissions et paramètres sont conservés. Double confirmation requise.
+Bouton dédié dans le panneau d'administration : il **archive** d'abord la base (copie `data/archive-<date>.db`, sans les sessions), puis **supprime tous les candidats** et leurs évaluations/fichiers, ainsi que les exports en attente de téléchargement. Les comptes, classes, commissions et paramètres sont conservés. Confirmation, puis **mot de passe de l'admin** exigé.
 
 ## Les 5 onglets
 
@@ -200,6 +310,9 @@ Les **observables** (sous-critères) de chaque grille ont été extraits des com
 - **Exporter tout** (enseignant/admin) : remplit les 5 onglets + la **fiche récapitulative** (infos candidat, session, et **note finale** en C34)
 - **Exporter tous les Excel** (écran candidats, enseignant/admin) : un zip contenant l'export complet de chaque candidat ayant un fichier Excel associé
 - L'export est une **copie** : le fichier associé au candidat n'est jamais modifié
+- La copie n'est téléchargeable **qu'une fois**, par celui qui l'a générée : elle est supprimée
+  du serveur après le téléchargement (ou au bout d'une heure). Pour la récupérer à nouveau,
+  relancer l'export.
 - Édition chirurgicale du zip (JSZip) : dessins, plages nommées, formules et fusions restent intacts ; les formules se recalculent à l'ouverture
 
 ## Note finale
@@ -227,30 +340,88 @@ proposée (arrondi ½ pt sup.) ne convient pas (ex. 12,07 → 12,5 alors qu'il v
 
 ## Sécurité
 
+**Comptes et mots de passe**
 - Mots de passe : **scrypt** avec sel aléatoire de 16 octets par compte (fonction à dérivation
-  coûteuse en mémoire, conçue pour le stockage de mots de passe — plus robuste que SHA-512+sel
-  face aux attaques par GPU), comparaison à temps constant.
-- Sessions : jeton aléatoire 256 bits en cookie **HttpOnly** (SameSite=Lax), expiration 7 jours.
+  coûteuse en mémoire, conçue pour le stockage de mots de passe), calcul asynchrone (le serveur
+  reste disponible), comparaison à temps constant ; 8 caractères minimum pour tout nouveau mot
+  de passe.
+- Jamais affichés en clair dans l'interface (champs masqués partout).
+- Mot de passe **provisoire** (compte créé ou réinitialisé par l'admin, compte `admin` initial
+  aléatoire) : à remplacer à la première connexion, tout le reste est refusé avant.
+- Inscription publique : fermée par défaut, ouverte/fermée par l'admin, rôle imposé
+  « commission », aucun accès aux candidats avant affectation par l'admin.
+- **Limitation des tentatives** (en mémoire ; adresses IPv6 regroupées par bloc /64) :
+  - connexion bloquée 15 min après 10 échecs pour un même identifiant depuis une même
+    adresse, ou 50 échecs depuis une même adresse ;
+  - au-delà de 10 échecs sur un compte, **toutes adresses confondues**, chaque nouvel essai
+    doit attendre de plus en plus longtemps (jusqu'à 5 min) : une attaque répartie sur de
+    nombreuses machines reste très lente ;
+  - inscription : 30 tentatives par adresse et par 15 min ;
+  - mot de passe redemandé à un compte connecté (« Mon compte », verrouillage du lot, purge) :
+    bloqué après 10 échecs. Réponse HTTP 429.
+- Même temps de réponse pour un identifiant inconnu et pour un compte existant.
+
+**Sessions**
+- Jeton aléatoire 256 bits en cookie **HttpOnly**, SameSite=Lax, **Secure** en HTTPS,
+  expiration 7 jours. La base n'en garde que l'**empreinte** SHA-256 : une copie de la base ne
+  permet pas de se connecter à la place de quelqu'un.
+- Déconnexion, changement / réinitialisation de mot de passe, suppression de compte : sessions
+  supprimées et connexions temps réel (WebSocket) correspondantes fermées.
+
+**Contrôle d'accès**
 - **Toutes** les routes API et le WebSocket exigent une session valide ; chaque action est
   contrôlée selon le rôle **côté serveur** (un client trafiqué ne peut ni écrire la soutenance
   en tant qu'admin/enseignant, ni accéder aux candidats/onglets hors périmètre commission).
+- WebSocket : la session est revérifiée à chaque message, et l'accès de chaque destinataire
+  à chaque diffusion. Un juré retiré d'une commission (ou un enseignant retiré d'une classe)
+  est prévenu et ne reçoit plus rien immédiatement ; une saisie refusée est signalée à son auteur.
+- Avant verrouillage, l'établissement ne peut rien savoir de la soutenance (ni note, ni présence
+  d'une note définitive) ; les notifications de verrouillage ne vont qu'aux utilisateurs ayant
+  accès au candidat.
+
+**Requêtes venant d'un autre site**
+- Toute requête d'écriture et toute connexion WebSocket provenant d'une autre page que
+  l'application (autre site, autre port de la même machine, sous-domaine voisin) est refusée
+  (en-têtes `Sec-Fetch-Site` / `Origin`).
+- En-têtes : **Content-Security-Policy** (scripts et connexions limités à l'application,
+  affichage dans un cadre interdit), `X-Frame-Options`, `X-Content-Type-Options`,
+  `Referrer-Policy`, HSTS en HTTPS ; réponses de l'API jamais mises en cache.
+
+**Robustesse**
 - SQL : exclusivement des **requêtes préparées** avec paramètres liés (pas d'injection possible).
-- Entrées validées partout (types, bornes, tailles) ; JSON malformé, ids invalides, payloads
-  WS corrompus → réponse 4xx propre sans stack trace, le serveur ne tombe pas.
-- Téléchargements : seul l'utilisateur qui a généré un export peut le télécharger ;
-  traversée de chemin neutralisée ; upload limité à 25 Mo, `.xlsx` uniquement.
+- Entrées validées partout (types, bornes, tailles) ; cookies mal encodés, JSON malformé,
+  trames WebSocket invalides → refus propre, le serveur ne tombe pas.
+- WebSocket : messages de 64 Ko au plus, 300 messages par 10 s et par connexion,
+  20 connexions par utilisateur.
+- Les noms et identifiants saisis par les utilisateurs sont toujours affichés comme du **texte**
+  (jamais interprétés en HTML) ; caractères interdits retirés avant l'écriture dans l'Excel.
+- Fichiers : noms choisis par le serveur (upload et exports, avec suffixe aléatoire) ;
+  téléchargement réservé à l'auteur de l'export ; upload limité à 25 Mo, `.xlsx` uniquement ;
+  fichiers créés en 600, dossiers en 700.
+
+**Limites connues**
+- L'administrateur reste une personne de confiance : il peut se créer un compte de juré, ou
+  réinitialiser le mot de passe d'un juré (qui s'en apercevra : son mot de passe ne marchera
+  plus), et accéder ainsi à la soutenance avant verrouillage. L'application ne garde pas encore
+  de journal de qui a modifié quoi.
+- L'admin doit vérifier l'identité d'un juré inscrit avant de l'affecter à une commission
+  (le nom affiché est déclaratif).
+- Les compteurs de tentatives sont remis à zéro au redémarrage du serveur.
+- Sans HTTPS (voir « Déploiement »), tout circule en clair sur le réseau.
 
 ## Architecture
 
 | Fichier | Rôle |
 |---|---|
 | `server.js` | Express + WebSocket + API REST + contrôle d'accès |
-| `auth.js` | Mots de passe (scrypt), sessions cookie, rôles |
+| `auth.js` | Mots de passe (scrypt), règles des identifiants / mots de passe, sessions cookie, rôles |
+| `ratelimit.js` | Limitation des tentatives (fenêtre fixe, attente croissante par compte, regroupement IPv6) |
+| `test/` | Tests automatiques (`npm test`, module de test intégré à Node, sans dépendance) |
 | `db.js` | SQLite (`data/evaluations.db`) : candidats, évaluations, commentaires, **verrous**, comptes, classes, commissions, paramètres ; archive/purge. Chemin surchargeable via `DB_FILE`. |
 | `excel.js` | Génération des copies Excel remplies |
 | `hierarchy.js` | Grilles des 5 onglets + mapping lignes/colonnes Excel |
 | `public/` | Frontend (login, candidats, saisie, administration) |
 | `uploads/` | Fichiers Excel associés aux candidats |
-| `exports/` | Copies générées à télécharger |
+| `exports/` | Copies générées à télécharger (supprimées après téléchargement ou au bout d'une heure) |
 
 > **Note** : `todo.html` est l'ancienne version statique, conservée pour référence.

@@ -17,6 +17,9 @@ const ROLE_LABELS = {
   commission: "Commission",
 };
 
+// Longueur minimale d'un nouveau mot de passe (identique à auth.js)
+const PASSWORD_MIN = 8;
+
 // État global
 let me = null;             // { user, allowedSheets }
 let HIERARCHIES = {};      // { sheetKey: sections }
@@ -69,16 +72,69 @@ function toast(msg, kind) {
   toast._t = setTimeout(() => (t.className = ""), 3200);
 }
 
+/* Saisie d'un mot de passe dans une fenêtre modale (champ masqué).
+   Remplace prompt(), qui affiche le mot de passe en clair à l'écran.
+   Résout avec le mot de passe saisi, ou null si annulé. */
+function askPassword({ title, message = "", label = "Mot de passe", withConfirm = false,
+                       minLength = 1, okLabel = "Valider" }) {
+  return new Promise((resolve) => {
+    const dlg = $("#pw-dialog");
+    const input = $("#pw-dialog-input");
+    const confirmInput = $("#pw-dialog-confirm");
+    const err = $("#pw-dialog-error");
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      input.value = confirmInput.value = "";
+      if (dlg.open) dlg.close();
+      resolve(value);
+    };
+
+    $("#pw-dialog-title").textContent = title;
+    $("#pw-dialog-msg").textContent = message;
+    $("#pw-dialog-label").textContent = label;
+    $("#pw-dialog-ok").textContent = okLabel;
+    $("#pw-dialog-confirm-wrap").classList.toggle("hidden", !withConfirm);
+    input.autocomplete = withConfirm ? "new-password" : "current-password";
+    input.value = confirmInput.value = "";
+    err.textContent = "";
+
+    $("#pw-dialog-form").onsubmit = (e) => {
+      e.preventDefault();
+      const v = input.value;
+      if (v.length < minLength) {
+        err.textContent = minLength > 1 ? `Au moins ${minLength} caractères.` : "Mot de passe requis.";
+        return;
+      }
+      if (withConfirm && v !== confirmInput.value) {
+        err.textContent = "Les deux mots de passe ne correspondent pas.";
+        return;
+      }
+      finish(v);
+    };
+    $("#pw-dialog-cancel").onclick = () => finish(null);
+    dlg.onclose = () => finish(null); // Échap
+    dlg.showModal();
+    input.focus();
+  });
+}
+
 async function api(url, opts) {
   const res = await fetch(url, opts);
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && url !== "/api/login") { showLogin(); throw new Error("Session expirée — reconnectez-vous."); }
+  // Mot de passe provisoire : le serveur refuse tout tant qu'il n'est pas changé
+  if (res.status === 403 && data.mustChangePassword && me) {
+    me.user.mustChangePassword = true;
+    openAccount(true);
+  }
   if (!res.ok) throw new Error(data.error || "Erreur serveur");
   return data;
 }
 
 function show(screenId) {
-  ["screen-login", "screen-candidates", "screen-grading", "screen-admin"]
+  ["screen-login", "screen-register", "screen-candidates", "screen-grading", "screen-admin", "screen-account"]
     .forEach(id => $("#" + id).classList.toggle("hidden", id !== screenId));
 }
 
@@ -102,7 +158,50 @@ function showLogin() {
   $("#userbar").classList.add("hidden");
   $("#conn-status").classList.add("hidden");
   show("screen-login");
+  refreshRegisterLink();
   setTimeout(() => $("#login-user").focus(), 50);
+}
+
+/* Lien « Créer un compte » : affiché seulement si les inscriptions sont ouvertes */
+async function refreshRegisterLink() {
+  let open = false;
+  try { open = (await api("/api/registration")).open === true; } catch {}
+  $("#register-link-wrap").classList.toggle("hidden", !open);
+  return open;
+}
+
+async function showRegister() {
+  if (!(await refreshRegisterLink())) {
+    toast("Les inscriptions sont fermées. Contactez l'administrateur.", "error");
+    return;
+  }
+  $("#register-error").textContent = "";
+  show("screen-register");
+  setTimeout(() => $("#reg-username").focus(), 50);
+}
+
+async function doRegister(e) {
+  e.preventDefault();
+  const err = $("#register-error");
+  err.textContent = "";
+  const password = $("#reg-password").value;
+  if (password.length < PASSWORD_MIN) { err.textContent = `Le mot de passe doit contenir au moins ${PASSWORD_MIN} caractères.`; return; }
+  if (password !== $("#reg-password2").value) { err.textContent = "Les deux mots de passe ne correspondent pas."; return; }
+  try {
+    me = await api("/api/register", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: $("#reg-username").value.trim(),
+        displayName: $("#reg-display").value.trim(),
+        password,
+      }),
+    });
+    $("#register-form").reset();
+    await enterApp();
+    toast("Compte créé ✓ — l'administrateur doit maintenant vous associer à une commission.", "success");
+  } catch (e2) {
+    err.textContent = e2.message;
+  }
 }
 
 async function enterApp() {
@@ -111,6 +210,15 @@ async function enterApp() {
   $("#conn-status").classList.remove("hidden");
   $("#ub-name").textContent = me.user.displayName || me.user.username;
   $("#ub-role").textContent = ROLE_LABELS[me.user.role] || me.user.role;
+
+  // Mot de passe provisoire : rien d'autre n'est accessible avant de le changer
+  if (me.user.mustChangePassword) {
+    $("#btn-admin").classList.add("hidden");
+    $("#conn-status").classList.add("hidden"); // pas de connexion temps réel avant le changement
+    openAccount(true);
+    return;
+  }
+
   $("#btn-admin").classList.toggle("hidden", !isAdmin());
   $("#btn-toggle-add").classList.toggle("hidden", !isAdmin()); // candidats gérés par l'admin
   $("#btn-export-full").classList.toggle("hidden", !canEdit());
@@ -145,10 +253,18 @@ function connectWS() {
     $("#conn-status").classList.add("online");
     if (current.candidate && current.sheet) subscribe();
   };
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     wsReady = false;
     $("#conn-status").textContent = "● Hors ligne";
     $("#conn-status").classList.remove("online");
+    // 4001 : session refusée ou fermée côté serveur (mot de passe changé
+    // depuis un autre appareil, compte supprimé…) -> retour à la connexion
+    if (ev.code === 4001) {
+      if (me) { showLogin(); toast("Votre session a été fermée — reconnectez-vous.", "error"); }
+      return;
+    }
+    // 4003 : mot de passe provisoire à changer -> pas de reconnexion
+    if (ev.code === 4003) { if (me) openAccount(true); return; }
     if (me) setTimeout(connectWS, 1500);
   };
   ws.onmessage = (ev) => {
@@ -192,6 +308,14 @@ function connectWS() {
       if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
     } else if (msg.type === "candidates") {
       if (!$("#screen-candidates").classList.contains("hidden")) loadCandidates();
+    } else if (msg.type === "revoked") {
+      // Accès retiré pendant la saisie (commission ou classe modifiée par l'admin)
+      if (!$("#screen-grading").classList.contains("hidden")) {
+        current = { candidate: null, sheet: null };
+        show("screen-candidates");
+        loadCandidates();
+        toast("Votre accès à ce candidat a été retiré par l'administrateur.", "error");
+      }
     }
   };
 }
@@ -234,7 +358,10 @@ async function loadCandidates() {
     const e = el("div", "empty-state");
     e.textContent = isAdmin()
       ? "Aucun candidat. Cliquez sur « + Ajouter un candidat »."
-      : "Aucun candidat ne vous est associé pour le moment.";
+      : me.user.role === "commission"
+        ? "Aucun candidat ne vous est associé pour le moment. Si votre compte vient d'être créé, " +
+          "l'administrateur doit encore vous associer à une commission : vos candidats apparaîtront ici."
+        : "Aucun candidat ne vous est associé pour le moment.";
     box.appendChild(e);
     return;
   }
@@ -363,6 +490,9 @@ async function deleteCandidate(c) {
 /* ════════════════ Liaison UI ════════════════ */
 function bindUI() {
   $("#login-form").onsubmit = doLogin;
+  $("#link-register").onclick = (e) => { e.preventDefault(); showRegister(); };
+  $("#link-login").onclick = (e) => { e.preventDefault(); showLogin(); };
+  $("#register-form").onsubmit = doRegister;
 
   $("#btn-logout").onclick = async () => {
     try { await api("/api/logout", { method: "POST" }); } catch {}
@@ -371,6 +501,17 @@ function bindUI() {
 
   $("#btn-admin").onclick = () => openAdmin();
   $("#btn-admin-back").onclick = () => { show("screen-candidates"); loadCandidates(); };
+
+  $("#btn-account").onclick = () => openAccount(false);
+  $("#btn-expand-all").onclick = expandAll;
+  $("#btn-collapse-all").onclick = collapseAll;
+  $("#btn-account-back").onclick = () => {
+    current = { candidate: null, sheet: null };
+    show("screen-candidates");
+    loadCandidates();
+  };
+  $("#account-form").onsubmit = changeOwnPassword;
+  $("#btn-reg-toggle").onclick = toggleRegistration;
 
   $("#btn-toggle-add").onclick = () => {
     const form = $("#add-form");
@@ -793,7 +934,11 @@ async function lockCurrentSheet() {
 /* Verrouillage du lot (commission) : double confirmation + mot de passe */
 async function lockBatch() {
   if (!confirm("Êtes-vous vraiment sûr ?\n\nVous allez verrouiller TOUTES vos soutenances. Vous ne pourrez plus les éditer ensuite.")) return;
-  const password = prompt("Confirmez avec le mot de passe de votre compte :");
+  const password = await askPassword({
+    title: "Verrouiller le lot",
+    message: "Confirmez avec le mot de passe de votre compte.",
+    okLabel: "Verrouiller",
+  });
   if (!password) return;
   try {
     const res = await api("/api/lock-batch", {
@@ -840,6 +985,49 @@ async function exportAllExcel() {
   } catch (e) { toast(e.message, "error"); }
 }
 
+/* ════════════════ Mon compte (tous les rôles) ════════════════
+   forced = mot de passe provisoire à remplacer : pas de bouton Retour,
+   l'application s'ouvre une fois le mot de passe changé. */
+let accountForced = false;
+
+function openAccount(forced = false) {
+  accountForced = forced === true;
+  $("#account-forced").classList.toggle("hidden", !accountForced);
+  $("#btn-account-back").classList.toggle("hidden", accountForced);
+  $("#account-form").reset();
+  $("#account-error").textContent = "";
+  $("#acc-username").textContent = me.user.username;
+  $("#acc-username-field").value = me.user.username;
+  show("screen-account");
+  setTimeout(() => $("#acc-current").focus(), 50);
+}
+
+async function changeOwnPassword(e) {
+  e.preventDefault();
+  const err = $("#account-error");
+  err.textContent = "";
+  const newPassword = $("#acc-new").value;
+  if (newPassword.length < PASSWORD_MIN) { err.textContent = `Le nouveau mot de passe doit contenir au moins ${PASSWORD_MIN} caractères.`; return; }
+  if (newPassword !== $("#acc-new2").value) { err.textContent = "Les deux nouveaux mots de passe ne correspondent pas."; return; }
+  try {
+    await api("/api/me/password", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ currentPassword: $("#acc-current").value, newPassword }),
+    });
+    $("#account-form").reset();
+    if (accountForced) {
+      accountForced = false;
+      me.user.mustChangePassword = false;
+      await enterApp();
+      toast("Mot de passe enregistré ✓ — bienvenue !", "success");
+      return;
+    }
+    toast("Mot de passe modifié ✓ — vos autres sessions ont été déconnectées.", "success");
+  } catch (e2) {
+    err.textContent = e2.message;
+  }
+}
+
 /* ════════════════ Administration ════════════════ */
 async function openAdmin() {
   show("screen-admin");
@@ -848,8 +1036,48 @@ async function openAdmin() {
     $("#set-academie").value = s.academie || "";
     $("#set-etablissement").value = s.etablissement || "";
     $("#set-session").value = s.session || "";
-    await Promise.all([loadUsers(), loadClasses(), loadCommissions()]);
+    await Promise.all([loadRegistration(), loadUsers(), loadClasses(), loadCommissions()]);
   } catch (e) { toast(e.message, "error"); }
+}
+
+/* ── Inscriptions des membres de commission ── */
+let registrationIsOpen = false;
+
+function renderRegistration(open) {
+  registrationIsOpen = open;
+  const state = $("#reg-state");
+  state.textContent = open ? "● Inscriptions ouvertes" : "● Inscriptions fermées";
+  state.className = "reg-state " + (open ? "open" : "closed");
+  const btn = $("#btn-reg-toggle");
+  btn.textContent = open ? "Fermer les inscriptions" : "Ouvrir les inscriptions";
+  btn.className = "btn btn-sm " + (open ? "btn-danger" : "btn-success");
+  $("#reg-url").textContent = location.origin;
+}
+
+async function loadRegistration() {
+  const r = await api("/api/registration");
+  renderRegistration(r.open === true);
+}
+
+async function toggleRegistration() {
+  const open = !registrationIsOpen;
+  try {
+    const r = await api("/api/registration", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ open }),
+    });
+    renderRegistration(r.open === true);
+    toast(r.open ? "Inscriptions ouvertes ✓" : "Inscriptions fermées ✓", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// Membre de commission pas encore associé à une commission
+const isPendingCommissionUser = (u) => u.role === "commission" && !u.commissionCount;
+
+function formatCreatedAt(s) {
+  if (!s) return "";
+  const d = new Date(String(s).replace(" ", "T") + "Z"); // datetime('now') SQLite = UTC
+  return isNaN(d) ? "" : d.toLocaleDateString("fr-FR");
 }
 
 async function saveSettings(e) {
@@ -872,16 +1100,48 @@ async function loadUsers() {
   const users = await api("/api/users");
   const box = $("#user-list");
   box.innerHTML = "";
+
+  // Comptes de commission en attente d'affectation : signalés et listés en premier
+  const pending = users.filter(isPendingCommissionUser);
+  const pendingBox = $("#reg-pending");
+  pendingBox.classList.toggle("hidden", !pending.length);
+  pendingBox.textContent = pending.length
+    ? `⏳ ${pending.length} compte(s) de commission en attente d'affectation à une commission.`
+    : "";
+  users.sort((a, b) => isPendingCommissionUser(b) - isPendingCommissionUser(a));
+
   for (const u of users) {
     const row = el("div", "admin-row");
+    // Nom et identifiant : saisis par les utilisateurs eux-mêmes (inscription)
+    // -> toujours insérés en TEXTE (textContent), jamais en HTML (anti-XSS)
     const grow = el("div", "grow");
-    grow.innerHTML = `<strong>${u.displayName || u.username}</strong>
-      <span class="sub">(${u.username})</span>`;
+    const strong = el("strong"); strong.textContent = u.displayName || u.username;
+    const created = formatCreatedAt(u.createdAt);
+    const sub = el("span", "sub");
+    sub.textContent = ` (${u.username})` + (created ? ` · créé le ${created}` : "");
+    grow.append(strong, sub);
+    const badges = [];
+    if (u.selfRegistered) {
+      const b = el("span", "user-badge"); b.textContent = "Auto-inscrit";
+      b.title = "Compte créé via le formulaire d'inscription";
+      badges.push(b);
+    }
+    if (isPendingCommissionUser(u)) {
+      const b = el("span", "user-badge pending"); b.textContent = "⏳ Sans commission";
+      b.title = "À associer à une commission (section « Commissions »)";
+      badges.push(b);
+    }
     const role = el("span", "role-tag"); role.textContent = ROLE_LABELS[u.role];
 
     const bPass = el("button", "btn btn-outline btn-sm"); bPass.textContent = "Mot de passe";
     bPass.onclick = async () => {
-      const p = prompt(`Nouveau mot de passe pour ${u.username} :`);
+      const p = await askPassword({
+        title: "Réinitialiser le mot de passe",
+        message: `Nouveau mot de passe provisoire pour ${u.username}. L'utilisateur devra le remplacer à sa prochaine connexion.`,
+        label: "Nouveau mot de passe",
+        withConfirm: true,
+        minLength: PASSWORD_MIN,
+      });
       if (!p) return;
       try {
         await api(`/api/users/${u.id}/password`, {
@@ -902,7 +1162,7 @@ async function loadUsers() {
       } catch (e) { toast(e.message, "error"); }
     };
 
-    row.append(grow, role, bPass, bDel);
+    row.append(grow, ...badges, role, bPass, bDel);
     box.appendChild(row);
   }
 }
@@ -979,7 +1239,7 @@ async function loadCommissions() {
     bDel.onclick = async () => {
       if (!confirm(`Supprimer la commission « ${com.name} » ?`)) return;
       await api(`/api/commissions/${com.id}`, { method: "DELETE" });
-      loadCommissions();
+      loadCommissions(); loadUsers();
     };
     head.append(title, bRen, bDel);
     row.appendChild(head);
@@ -987,7 +1247,7 @@ async function loadCommissions() {
     // membres
     row.appendChild(chipList("Membres (jury) :", com.members,
       (m) => m.displayName || m.username,
-      async (m) => { await api(`/api/commissions/${com.id}/members/${m.id}`, { method: "DELETE" }); loadCommissions(); },
+      async (m) => { await api(`/api/commissions/${com.id}/members/${m.id}`, { method: "DELETE" }); loadCommissions(); loadUsers(); },
       commissionUsers.filter(u => !com.members.some(m => m.id === u.id)),
       (u) => u.displayName || u.username,
       async (uId) => {
@@ -995,7 +1255,7 @@ async function loadCommissions() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ userId: uId }),
         });
-        loadCommissions();
+        loadCommissions(); loadUsers(); // badges « Sans commission »
       }));
 
     // candidats
@@ -1112,9 +1372,17 @@ async function loadClasses() {
 /* ── Purge annuelle ── */
 async function doPurge() {
   if (!confirm("ARCHIVER puis SUPPRIMER tous les candidats et leurs évaluations ?\n\nUne copie de sauvegarde de la base sera créée. Les comptes, classes et commissions seront conservés.\n\nCette action est irréversible.")) return;
-  if (!confirm("Dernière confirmation : supprimer définitivement tous les candidats ?")) return;
+  const password = await askPassword({
+    title: "Purge de début d'année",
+    message: "Dernière confirmation : saisissez votre mot de passe pour supprimer définitivement tous les candidats.",
+    okLabel: "Archiver et supprimer",
+  });
+  if (!password) return;
   try {
-    const r = await api("/api/purge", { method: "POST" });
+    const r = await api("/api/purge", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
     toast(`Purge effectuée : ${r.removed} candidat(s) supprimé(s). Archive : ${r.archived}`, "success");
     loadClasses(); loadCommissions();
   } catch (e) { toast(e.message, "error"); }
